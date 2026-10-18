@@ -1,4 +1,5 @@
 import fs from 'fs';
+import path from 'path';
 import http from 'http';
 import makeWASocket, {
   useMultiFileAuthState,
@@ -12,7 +13,7 @@ import dotenv from 'dotenv';
 
 dotenv.config();
 
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+const GEMINI_KEY = process.env.GEMINI_API_KEY;
 const SHEET_URL = process.env.SHEET_WEBAPP_URL;
 
 // ==========================================
@@ -24,6 +25,11 @@ http.createServer((req, res) => {
   res.end('Bot Keuangan WhatsApp Aktif 24 Jam');
 }).listen(port, () => {
   console.log(`[INFO] Server HTTP dummy aktif pada port ${port}`);
+  if (!SHEET_URL) {
+    console.error('⚠️ PERINGATAN: Variabel SHEET_WEBAPP_URL masih kosong di Railway Variables!');
+  } else {
+    console.log(`[INFO] Google Sheet WebApp terpasang: ${SHEET_URL.slice(0, 35)}...`);
+  }
 });
 
 // Helper Format Tanggal & Rupiah
@@ -37,10 +43,31 @@ function getNow() {
 
 const formatRupiah = (num) => `Rp ${Number(num || 0).toLocaleString('id-ID')}`;
 
+// Fungsi hapus file di dalam volume (Aman untuk mount path Railway)
+function clearAuthFolder(folderPath = './auth_info') {
+  try {
+    if (!fs.existsSync(folderPath)) return;
+    const files = fs.readdirSync(folderPath);
+    for (const file of files) {
+      const curPath = path.join(folderPath, file);
+      if (fs.lstatSync(curPath).isDirectory()) {
+        fs.rmSync(curPath, { recursive: true, force: true });
+      } else {
+        fs.unlinkSync(curPath);
+      }
+    }
+    console.log('Isi folder auth_info berhasil dibersihkan.');
+  } catch (err) {
+    console.error('Gagal membersihkan isi folder auth_info:', err.message);
+  }
+}
+
 // ==========================================
 // 2. PARSER FOTO STRUK (GEMINI AI)
 // ==========================================
 async function parseReceipt(buffer) {
+  if (!GEMINI_KEY) throw new Error("GEMINI_API_KEY belum diisi");
+  const genAI = new GoogleGenerativeAI(GEMINI_KEY);
   const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
   const prompt = `
   Analisis struk belanja ini. Ambil total pembayaran, kategori belanja, dan rincian singkat merchant/barang.
@@ -68,10 +95,12 @@ async function parseReceipt(buffer) {
 // 3. SIMPAN KE GOOGLE SHEETS
 // ==========================================
 async function saveToSheet(tipe, nominal, kategori, keterangan) {
+  if (!SHEET_URL) throw new Error("Variabel SHEET_WEBAPP_URL kosong! Cek tab Variables di Railway.");
+
   const { tanggal, waktu } = getNow();
   try {
     const res = await axios.post(
-      SHEET_URL,
+      SHEET_URL.trim(),
       {
         action: "add",
         tanggal,
@@ -88,7 +117,7 @@ async function saveToSheet(tipe, nominal, kategori, keterangan) {
     );
     return res.data;
   } catch (err) {
-    console.error("Gagal simpan ke Google Sheets:", err.response?.data || err.message);
+    console.error("Gagal simpan ke Google Sheets:", err.message);
     throw err;
   }
 }
@@ -97,9 +126,11 @@ async function saveToSheet(tipe, nominal, kategori, keterangan) {
 // 4. HITUNG STATISTIK REAL-TIME & HARI INI
 // ==========================================
 async function calculateRealtimeStats() {
+  if (!SHEET_URL) throw new Error("Variabel SHEET_WEBAPP_URL kosong!");
+
   try {
     const res = await axios.post(
-      SHEET_URL,
+      SHEET_URL.trim(),
       { action: "report" },
       {
         maxRedirects: 5,
@@ -112,7 +143,7 @@ async function calculateRealtimeStats() {
       try {
         rows = JSON.parse(rows);
       } catch (e) {
-        console.error("Format data Google Sheets bukan JSON:", rows);
+        console.error("Format data Google Sheets bukan JSON string:", rows);
       }
     }
 
@@ -167,7 +198,7 @@ async function calculateRealtimeStats() {
       totalTransaksi
     };
   } catch (err) {
-    console.error("Gagal membaca laporan Google Sheets:", err.response?.data || err.message);
+    console.error("Gagal membaca laporan Google Sheets:", err.message);
     throw err;
   }
 }
@@ -239,12 +270,8 @@ async function startBot() {
       console.log(`Koneksi terputus (status: ${statusCode}). Reconnect: ${shouldReconnect}`);
 
       if (isLoggedOut) {
-        console.log('Sesi kedaluwarsa (401/LoggedOut). Menghapus folder auth_info lama...');
-        try {
-          fs.rmSync('./auth_info', { recursive: true, force: true });
-        } catch (e) {
-          console.error('Gagal hapus folder auth_info:', e);
-        }
+        console.log('Sesi kedaluwarsa (401/LoggedOut). Membersihkan isi folder auth_info...');
+        clearAuthFolder('./auth_info');
         startBot();
       } else if (shouldReconnect) {
         startBot();
@@ -374,8 +401,8 @@ async function startBot() {
       }
 
     } catch (err) {
-      console.error("Error memproses pesan:", err.response?.data || err.message || err);
-      await sock.sendMessage(targetChat, { text: '⚠️ Terjadi kesalahan saat memproses data. Cek log server.' });
+      console.error("Error memproses pesan:", err.message);
+      await sock.sendMessage(targetChat, { text: `⚠️ Gagal memproses: ${err.message}` });
     }
   });
 }
