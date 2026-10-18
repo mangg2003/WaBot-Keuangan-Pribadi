@@ -28,7 +28,7 @@ http.createServer((req, res) => {
   if (!SHEET_URL) {
     console.error('⚠️ PERINGATAN: Variabel SHEET_WEBAPP_URL masih kosong di Railway Variables!');
   } else {
-    console.log(`[INFO] Google Sheet WebApp terpasang: ${SHEET_URL.slice(0, 35)}...`);
+    console.log(`[INFO] Google Sheet WebApp terpasang.`);
   }
 });
 
@@ -43,7 +43,7 @@ function getNow() {
 
 const formatRupiah = (num) => `Rp ${Number(num || 0).toLocaleString('id-ID')}`;
 
-// Fungsi hapus file di dalam volume (Aman untuk mount path Railway)
+// Fungsi pembersih isi folder auth_info (Aman untuk mount path Railway)
 function clearAuthFolder(folderPath = './auth_info') {
   try {
     if (!fs.existsSync(folderPath)) return;
@@ -128,6 +128,9 @@ async function saveToSheet(tipe, nominal, kategori, keterangan) {
 async function calculateRealtimeStats() {
   if (!SHEET_URL) throw new Error("Variabel SHEET_WEBAPP_URL kosong!");
 
+  // Jeda 800ms agar Google Sheets selesai menulis baris transaksi baru
+  await new Promise((resolve) => setTimeout(resolve, 800));
+
   try {
     const res = await axios.post(
       SHEET_URL.trim(),
@@ -163,19 +166,34 @@ async function calculateRealtimeStats() {
 
       const now = new Date();
       const pad = (n) => String(n).padStart(2, '0');
-      const day = pad(now.getDate());
-      const month = pad(now.getMonth() + 1);
-      const year = String(now.getFullYear());
-      const todaySlash = `${day}/${month}/${year}`;
-      const todayDash = `${year}-${month}-${day}`;
+      const todayDate = pad(now.getDate());
+      const todayMonth = pad(now.getMonth() + 1);
+      const todayYear = String(now.getFullYear());
 
-      items.forEach(r => {
-        const tgl = String(r[0] || '');
+      const patternSlash = `${todayDate}/${todayMonth}/${todayYear}`;
+      const patternDash = `${todayYear}-${todayMonth}-${todayDate}`;
+
+      items.forEach((r) => {
+        const rawDate = r[0];
         const tipe = String(r[2] || '').toLowerCase();
         const rawNominal = String(r[4] || '0').replace(/[^0-9]/g, '');
         const nominal = parseInt(rawNominal, 10) || 0;
 
-        const isToday = tgl.includes(todaySlash) || tgl.startsWith(todayDash) || (tgl.includes(day) && tgl.includes(year));
+        let isToday = false;
+        if (rawDate) {
+          const strDate = String(rawDate);
+          if (strDate.includes(patternSlash) || strDate.startsWith(patternDash)) {
+            isToday = true;
+          } else {
+            const parsed = new Date(rawDate);
+            if (!isNaN(parsed.getTime())) {
+              isToday =
+                parsed.getDate() === now.getDate() &&
+                parsed.getMonth() === now.getMonth() &&
+                parsed.getFullYear() === now.getFullYear();
+            }
+          }
+        }
 
         if (tipe.includes('masuk')) {
           totalMasuk += nominal;
@@ -207,7 +225,7 @@ async function calculateRealtimeStats() {
 // 5. PARSER TRANSAKSI MANUAL (+ / -)
 // ==========================================
 function parseTransactionLines(text) {
-  const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
+  const lines = text.split('\n').map((l) => l.trim()).filter(Boolean);
   const items = [];
 
   for (const line of lines) {
@@ -218,7 +236,15 @@ function parseTransactionLines(text) {
     const parts = rawContent.split(/\s+/);
 
     const nominal = parseInt(parts[0].replace(/[^0-9]/g, ''), 10);
-    const keterangan = parts.slice(1).join(' ') || (tipe === 'Pemasukan' ? 'Pemasukan Umum' : 'Pengeluaran Umum');
+    // Bersihkan tanda kurung yang tidak diperlukan di awal/akhir keterangan
+    let keterangan = parts.slice(1).join(' ').trim();
+    if (keterangan.startsWith('(') && keterangan.endsWith(')')) {
+      keterangan = keterangan.slice(1, -1).trim();
+    }
+    if (!keterangan) {
+      keterangan = tipe === 'Pemasukan' ? 'Pemasukan Umum' : 'Pengeluaran Umum';
+    }
+
     const kategori = tipe === 'Pemasukan' ? 'Pendapatan' : 'Umum';
 
     if (!isNaN(nominal) && nominal > 0) {
@@ -289,14 +315,16 @@ async function startBot() {
     if (!msg.message) return;
 
     const targetChat = msg.key.remoteJid;
-    const bodyText = msg.message.conversation ||
-                     msg.message.extendedTextMessage?.text ||
-                     msg.message.imageMessage?.caption || '';
+    const bodyText =
+      msg.message.conversation ||
+      msg.message.extendedTextMessage?.text ||
+      msg.message.imageMessage?.caption ||
+      '';
 
     const isImage = Boolean(msg.message.imageMessage);
 
     try {
-      // 1. Ekstraksi Foto Struk
+      // 1. Ekstraksi Foto Struk Otomatis
       if (isImage) {
         await sock.sendMessage(targetChat, { text: '⏳ Sedang membaca struk belanja Anda...' });
         const buffer = await downloadMediaMessage(msg, 'buffer', {});
@@ -305,15 +333,16 @@ async function startBot() {
         await saveToSheet("Pengeluaran", result.nominal, result.kategori, result.keterangan);
         const stats = await calculateRealtimeStats();
 
-        const reply = `🧾 *Struk Berhasil Dicatat!*\n` +
-                      `━━━━━━━━━━━━━━━━━\n` +
-                      `🏷️ Keterangan: ${result.keterangan}\n` +
-                      `📂 Kategori: ${result.kategori}\n` +
-                      `💸 Pengeluaran: ${formatRupiah(result.nominal)}\n` +
-                      `━━━━━━━━━━━━━━━━━\n` +
-                      `💵 *Saldo Saat Ini:* ${formatRupiah(stats.saldoTotal)}\n` +
-                      `🔴 Keluar Hari Ini: ${formatRupiah(stats.keluarHariIni)}\n` +
-                      `🟢 Masuk Hari Ini: ${formatRupiah(stats.masukHariIni)}`;
+        const reply =
+          `🧾 *Struk Berhasil Dicatat!*\n` +
+          `━━━━━━━━━━━━━━━━━\n` +
+          `🏷️ Keterangan: ${result.keterangan}\n` +
+          `📂 Kategori: ${result.kategori}\n` +
+          `💸 Pengeluaran: ${formatRupiah(result.nominal)}\n` +
+          `━━━━━━━━━━━━━━━━━\n` +
+          `💵 *Saldo Saat Ini:* ${formatRupiah(stats.saldoTotal)}\n` +
+          `🔴 Keluar Hari Ini: ${formatRupiah(stats.keluarHariIni)}\n` +
+          `🟢 Masuk Hari Ini: ${formatRupiah(stats.masukHariIni)}`;
 
         await sock.sendMessage(targetChat, { text: reply });
         return;
@@ -323,16 +352,17 @@ async function startBot() {
 
       // 2. Menu Bantuan
       if (lower === 'menu' || lower === 'help' || lower === 'halo') {
-        const menuText = `🤖 *Panduan Bot Keuangan*\n\n` +
-                         `1. *Catat 1 Transaksi:*\n` +
-                         `   • \`-20000 Makan lalapan\`\n` +
-                         `   • \`+500000 Gaji sampingan\`\n\n` +
-                         `2. *Catat Sekaligus (Baris Baru):*\n` +
-                         `   \`-15000 Kopi\`\n` +
-                         `   \`-30000 Bensin\`\n\n` +
-                         `3. *Foto Struk:*\n` +
-                         `   Kirimkan langsung foto struk fisik belanjaan.\n\n` +
-                         `4. *Laporan:* Kirim \`laporan hari\`, \`laporan bulan\`, atau \`laporan tahun\``;
+        const menuText =
+          `🤖 *Panduan Bot Keuangan*\n\n` +
+          `1. *Catat 1 Transaksi:*\n` +
+          `   • \`-20000 Makan lalapan\`\n` +
+          `   • \`+500000 Gaji sampingan\`\n\n` +
+          `2. *Catat Sekaligus (Baris Baru):*\n` +
+          `   \`-15000 Kopi\`\n` +
+          `   \`-30000 Bensin\`\n\n` +
+          `3. *Foto Struk:*\n` +
+          `   Kirimkan langsung foto struk fisik belanjaan.\n\n` +
+          `4. *Laporan:* Kirim \`laporan hari\`, \`laporan bulan\`, atau \`laporan tahun\``;
         await sock.sendMessage(targetChat, { text: menuText });
         return;
       }
@@ -347,19 +377,20 @@ async function startBot() {
 
         const stats = await calculateRealtimeStats();
 
-        // Kasus Banyak Transaksi Sekaligus
+        // Kasus Banyak Transaksi Sekaligus (Multi-baris)
         if (transactions.length > 1) {
           let detailBaris = transactions
-            .map(t => `• ${t.keterangan}: ${formatRupiah(t.nominal)} (${t.tipe})`)
+            .map((t) => `• ${t.keterangan}: ${formatRupiah(t.nominal)} (${t.tipe})`)
             .join('\n');
 
-          const replyMulti = `✅ *${transactions.length} Transaksi Berhasil Dicatat!*\n` +
-                             `━━━━━━━━━━━━━━━━━\n` +
-                             `${detailBaris}\n` +
-                             `━━━━━━━━━━━━━━━━━\n` +
-                             `💵 *Saldo Total:* ${formatRupiah(stats.saldoTotal)}\n` +
-                             `🟢 Masuk Hari Ini: ${formatRupiah(stats.masukHariIni)}\n` +
-                             `🔴 Keluar Hari Ini: ${formatRupiah(stats.keluarHariIni)}`;
+          const replyMulti =
+            `✅ *${transactions.length} Transaksi Berhasil Dicatat!*\n` +
+            `━━━━━━━━━━━━━━━━━\n` +
+            `${detailBaris}\n` +
+            `━━━━━━━━━━━━━━━━━\n` +
+            `💵 *Saldo Total:* ${formatRupiah(stats.saldoTotal)}\n` +
+            `🟢 Masuk Hari Ini: ${formatRupiah(stats.masukHariIni)}\n` +
+            `🔴 Keluar Hari Ini: ${formatRupiah(stats.keluarHariIni)}`;
 
           await sock.sendMessage(targetChat, { text: replyMulti });
           return;
@@ -371,35 +402,36 @@ async function startBot() {
         if (single.tipe === 'Pemasukan') {
           const saldoAwal = stats.saldoTotal - single.nominal;
 
-          const replyPemasukan = `💰 *Pemasukan Berhasil Dicatat!*\n` +
-                                 `━━━━━━━━━━━━━━━━━\n` +
-                                 `💵 *Saldo Total:* ${formatRupiah(stats.saldoTotal)}\n\n` +
-                                 `*Detail:*\n` +
-                                 `• Saldo Awal: ${formatRupiah(saldoAwal)}\n` +
-                                 `• Pemasukan Baru: ${formatRupiah(single.nominal)} (${single.keterangan})\n` +
-                                 `• Total Pemasukan: ${formatRupiah(stats.totalMasuk)}\n` +
-                                 `• Total Pengeluaran: ${formatRupiah(stats.totalKeluar)}\n` +
-                                 `• Masuk Hari Ini: ${formatRupiah(stats.masukHariIni)}\n` +
-                                 `• Total Transaksi Database: ${stats.totalTransaksi}`;
+          const replyPemasukan =
+            `💰 *Pemasukan Berhasil Dicatat!*\n` +
+            `━━━━━━━━━━━━━━━━━\n` +
+            `💵 *Saldo Total:* ${formatRupiah(stats.saldoTotal)}\n\n` +
+            `*Detail:*\n` +
+            `• Saldo Awal: ${formatRupiah(saldoAwal)}\n` +
+            `• Pemasukan Baru: ${formatRupiah(single.nominal)} (${single.keterangan})\n` +
+            `• Total Pemasukan: ${formatRupiah(stats.totalMasuk)}\n` +
+            `• Total Pengeluaran: ${formatRupiah(stats.totalKeluar)}\n` +
+            `• Masuk Hari Ini: ${formatRupiah(stats.masukHariIni)}\n` +
+            `• Total Transaksi Database: ${stats.totalTransaksi}`;
 
           await sock.sendMessage(targetChat, { text: replyPemasukan });
           return;
         }
 
         if (single.tipe === 'Pengeluaran') {
-          const replyPengeluaran = `💸 *Pengeluaran Berhasil Dicatat!*\n` +
-                                   `━━━━━━━━━━━━━━━━━\n` +
-                                   `🍽️ ${single.keterangan}: ${formatRupiah(single.nominal)}\n` +
-                                   `━━━━━━━━━━━━━━━━━\n` +
-                                   `💵 *Saldo Saat Ini:* ${formatRupiah(stats.saldoTotal)}\n` +
-                                   `🔴 Keluar Hari Ini: ${formatRupiah(stats.keluarHariIni)}\n` +
-                                   `🟢 Masuk Hari Ini: ${formatRupiah(stats.masukHariIni)}`;
+          const replyPengeluaran =
+            `💸 *Pengeluaran Berhasil Dicatat!*\n` +
+            `━━━━━━━━━━━━━━━━━\n` +
+            `🍽️ ${single.keterangan}: ${formatRupiah(single.nominal)}\n` +
+            `━━━━━━━━━━━━━━━━━\n` +
+            `💵 *Saldo Saat Ini:* ${formatRupiah(stats.saldoTotal)}\n` +
+            `🔴 Keluar Hari Ini: ${formatRupiah(stats.keluarHariIni)}\n` +
+            `🟢 Masuk Hari Ini: ${formatRupiah(stats.masukHariIni)}`;
 
           await sock.sendMessage(targetChat, { text: replyPengeluaran });
           return;
         }
       }
-
     } catch (err) {
       console.error("Error memproses pesan:", err.message);
       await sock.sendMessage(targetChat, { text: `⚠️ Gagal memproses: ${err.message}` });
