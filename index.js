@@ -176,20 +176,20 @@ async function startBot() {
   });
 
   // Fitur Pairing Code jika belum ada sesi login
+  // Fitur Pairing Code jika belum ada sesi login
   if (!sock.authState.creds.registered) {
-    // GANTI DENGAN NOMOR HP BOT ANDA (Format 62xxxxxxxxxx tanpa spasi atau tanda +)
     const nomorWA = "6289677640957"; 
 
     setTimeout(async () => {
       try {
         const code = await sock.requestPairingCode(nomorWA);
         console.log(`\n====================================`);
-        console.log(`👉 KODE PAIRING ANDA: ${code}`);
+        console.log(`👉 KODE PAIRING BARU ANDA: ${code}`);
         console.log(`====================================\n`);
       } catch (err) {
         console.error("Gagal meminta pairing code:", err);
       }
-    }, 4000);
+    }, 6000); // Beri jeda 6 detik agar koneksi socket stabil dahulu
   }
 
   sock.ev.on('connection.update', (update) => {
