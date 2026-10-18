@@ -69,71 +69,107 @@ async function parseReceipt(buffer) {
 // ==========================================
 async function saveToSheet(tipe, nominal, kategori, keterangan) {
   const { tanggal, waktu } = getNow();
-  await axios.post(SHEET_URL, {
-    action: "add",
-    tanggal,
-    waktu,
-    tipe,
-    kategori,
-    nominal: Number(nominal),
-    keterangan
-  });
-  return { tanggal, waktu };
+  try {
+    const res = await axios.post(
+      SHEET_URL,
+      {
+        action: "add",
+        tanggal,
+        waktu,
+        tipe,
+        kategori,
+        nominal: Number(nominal),
+        keterangan
+      },
+      {
+        maxRedirects: 5,
+        headers: { 'Content-Type': 'application/json' }
+      }
+    );
+    return res.data;
+  } catch (err) {
+    console.error("Gagal simpan ke Google Sheets:", err.response?.data || err.message);
+    throw err;
+  }
 }
 
 // ==========================================
 // 4. HITUNG STATISTIK REAL-TIME & HARI INI
 // ==========================================
 async function calculateRealtimeStats() {
-  const res = await axios.post(SHEET_URL, { action: "report" });
-  const rows = res.data?.data || [];
-
-  let totalMasuk = 0;
-  let totalKeluar = 0;
-  let masukHariIni = 0;
-  let keluarHariIni = 0;
-  let totalTransaksi = 0;
-
-  if (rows.length > 1) {
-    const items = rows.slice(1);
-    totalTransaksi = items.length;
-
-    const now = new Date();
-    const pad = (n) => String(n).padStart(2, '0');
-    const day = pad(now.getDate());
-    const month = pad(now.getMonth() + 1);
-    const year = String(now.getFullYear());
-    const todaySlash = `${day}/${month}/${year}`;
-    const todayDash = `${year}-${month}-${day}`;
-
-    items.forEach(r => {
-      const tgl = String(r[0] || '');
-      const tipe = String(r[2] || '').toLowerCase();
-      const rawNominal = String(r[4] || '0').replace(/[^0-9]/g, '');
-      const nominal = parseInt(rawNominal, 10) || 0;
-
-      const isToday = tgl.includes(todaySlash) || tgl.startsWith(todayDash) || (tgl.includes(day) && tgl.includes(year));
-
-      if (tipe.includes('masuk')) {
-        totalMasuk += nominal;
-        if (isToday) masukHariIni += nominal;
-      } else if (tipe.includes('keluar')) {
-        totalKeluar += nominal;
-        if (isToday) keluarHariIni += nominal;
+  try {
+    const res = await axios.post(
+      SHEET_URL,
+      { action: "report" },
+      {
+        maxRedirects: 5,
+        headers: { 'Content-Type': 'application/json' }
       }
-    });
+    );
+
+    let rows = res.data;
+    if (typeof rows === 'string') {
+      try {
+        rows = JSON.parse(rows);
+      } catch (e) {
+        console.error("Format data Google Sheets bukan JSON:", rows);
+      }
+    }
+
+    if (rows && typeof rows === 'object' && rows.data) {
+      rows = rows.data;
+    }
+
+    let totalMasuk = 0;
+    let totalKeluar = 0;
+    let masukHariIni = 0;
+    let keluarHariIni = 0;
+    let totalTransaksi = 0;
+
+    if (Array.isArray(rows) && rows.length > 1) {
+      const items = rows.slice(1);
+      totalTransaksi = items.length;
+
+      const now = new Date();
+      const pad = (n) => String(n).padStart(2, '0');
+      const day = pad(now.getDate());
+      const month = pad(now.getMonth() + 1);
+      const year = String(now.getFullYear());
+      const todaySlash = `${day}/${month}/${year}`;
+      const todayDash = `${year}-${month}-${day}`;
+
+      items.forEach(r => {
+        const tgl = String(r[0] || '');
+        const tipe = String(r[2] || '').toLowerCase();
+        const rawNominal = String(r[4] || '0').replace(/[^0-9]/g, '');
+        const nominal = parseInt(rawNominal, 10) || 0;
+
+        const isToday = tgl.includes(todaySlash) || tgl.startsWith(todayDash) || (tgl.includes(day) && tgl.includes(year));
+
+        if (tipe.includes('masuk')) {
+          totalMasuk += nominal;
+          if (isToday) masukHariIni += nominal;
+        } else if (tipe.includes('keluar')) {
+          totalKeluar += nominal;
+          if (isToday) keluarHariIni += nominal;
+        }
+      });
+    }
+
+    const saldoTotal = totalMasuk - totalKeluar;
+
+    return {
+      saldoTotal,
+      totalMasuk,
+      totalKeluar,
+      masukHariIni,
+      keluarHariIni,
+      totalTransaksi
+    };
+  } catch (err) {
+    console.error("Gagal membaca laporan Google Sheets:", err.response?.data || err.message);
+    throw err;
   }
-
-  const saldoTotal = totalMasuk - totalKeluar;
-
-  return {
-    saldoTotal,
-    totalMasuk,
-    totalKeluar,
-    masukHariIni,
-    keluarHariIni,
-    totalTransaksi
-  };
 }
 
 // ==========================================
@@ -182,7 +218,6 @@ async function startBot() {
   sock.ev.on('connection.update', async (update) => {
     const { connection, lastDisconnect, qr } = update;
 
-    // Minta Pairing Code hanya saat Baileys siap dan belum terdaftar
     if (qr && !sock.authState.creds.registered && !pairingRequested) {
       pairingRequested = true;
       try {
@@ -339,7 +374,7 @@ async function startBot() {
       }
 
     } catch (err) {
-      console.error("Error memproses pesan:", err);
+      console.error("Error memproses pesan:", err.response?.data || err.message || err);
       await sock.sendMessage(targetChat, { text: '⚠️ Terjadi kesalahan saat memproses data. Cek log server.' });
     }
   });
