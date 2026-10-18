@@ -1,3 +1,4 @@
+import fs from 'fs';
 import http from 'http';
 import makeWASocket, {
   useMultiFileAuthState,
@@ -164,9 +165,6 @@ function parseTransactionLines(text) {
 // ==========================================
 // 6. INISIALISASI BOT BAILEYS
 // ==========================================
-// ==========================================
-// 6. INISIALISASI BOT BAILEYS
-// ==========================================
 async function startBot() {
   const { state, saveCreds } = await useMultiFileAuthState('./auth_info');
 
@@ -184,7 +182,7 @@ async function startBot() {
   sock.ev.on('connection.update', async (update) => {
     const { connection, lastDisconnect, qr } = update;
 
-    // Minta Pairing Code hanya saat Baileys sudah siap (QR event terpicu)
+    // Minta Pairing Code hanya saat Baileys siap dan belum terdaftar
     if (qr && !sock.authState.creds.registered && !pairingRequested) {
       pairingRequested = true;
       try {
@@ -200,9 +198,20 @@ async function startBot() {
 
     if (connection === 'close') {
       const statusCode = lastDisconnect?.error?.output?.statusCode;
-      const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
+      const isLoggedOut = statusCode === DisconnectReason.loggedOut || statusCode === 401;
+      const shouldReconnect = !isLoggedOut;
+
       console.log(`Koneksi terputus (status: ${statusCode}). Reconnect: ${shouldReconnect}`);
-      if (shouldReconnect) {
+
+      if (isLoggedOut) {
+        console.log('Sesi kedaluwarsa (401/LoggedOut). Menghapus folder auth_info lama...');
+        try {
+          fs.rmSync('./auth_info', { recursive: true, force: true });
+        } catch (e) {
+          console.error('Gagal hapus folder auth_info:', e);
+        }
+        startBot();
+      } else if (shouldReconnect) {
         startBot();
       }
     } else if (connection === 'open') {
@@ -211,8 +220,6 @@ async function startBot() {
   });
 
   sock.ev.on('creds.update', saveCreds);
-
-
 
   sock.ev.on('messages.upsert', async ({ messages, type }) => {
     if (type !== 'notify') return;
