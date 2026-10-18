@@ -30,7 +30,7 @@ function getNow() {
   const d = new Date();
   const pad = (n) => String(n).padStart(2, '0');
   const tanggal = `${pad(d.getDate())}/${pad(d.getMonth() + 1)}/${d.getFullYear()}`;
-  const waktu = `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds()}`;
+  const waktu = `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
   return { tanggal, waktu };
 }
 
