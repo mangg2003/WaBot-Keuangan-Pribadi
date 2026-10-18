@@ -164,23 +164,29 @@ function parseTransactionLines(text) {
 // ==========================================
 // 6. INISIALISASI BOT BAILEYS
 // ==========================================
+// ==========================================
+// 6. INISIALISASI BOT BAILEYS
+// ==========================================
 async function startBot() {
   const { state, saveCreds } = await useMultiFileAuthState('./auth_info');
 
   const sock = makeWASocket({
     auth: state,
     logger: pino({ level: 'silent' }),
-    printQRInTerminal: false, // QR dimatikan agar log bersih
+    printQRInTerminal: false,
     browser: ['Ubuntu', 'Chrome', '20.0.04'],
     syncFullHistory: false
   });
 
-  // Fitur Pairing Code jika belum ada sesi login
-  // Fitur Pairing Code jika belum ada sesi login
-  if (!sock.authState.creds.registered) {
-    const nomorWA = "6289677640957"; 
+  const nomorWA = "6289677640957";
+  let pairingRequested = false;
 
-    setTimeout(async () => {
+  sock.ev.on('connection.update', async (update) => {
+    const { connection, lastDisconnect, qr } = update;
+
+    // Minta Pairing Code hanya saat Baileys sudah siap (QR event terpicu)
+    if (qr && !sock.authState.creds.registered && !pairingRequested) {
+      pairingRequested = true;
       try {
         const code = await sock.requestPairingCode(nomorWA);
         console.log(`\n====================================`);
@@ -188,21 +194,25 @@ async function startBot() {
         console.log(`====================================\n`);
       } catch (err) {
         console.error("Gagal meminta pairing code:", err);
+        pairingRequested = false;
       }
-    }, 6000); // Beri jeda 6 detik agar koneksi socket stabil dahulu
-  }
+    }
 
-  sock.ev.on('connection.update', (update) => {
-    const { connection, lastDisconnect } = update;
     if (connection === 'close') {
-      const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
-      if (shouldReconnect) startBot();
+      const statusCode = lastDisconnect?.error?.output?.statusCode;
+      const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
+      console.log(`Koneksi terputus (status: ${statusCode}). Reconnect: ${shouldReconnect}`);
+      if (shouldReconnect) {
+        startBot();
+      }
     } else if (connection === 'open') {
       console.log('✅ Bot WhatsApp Keuangan Berhasil Terhubung!');
     }
   });
 
   sock.ev.on('creds.update', saveCreds);
+
+
 
   sock.ev.on('messages.upsert', async ({ messages, type }) => {
     if (type !== 'notify') return;
