@@ -1,10 +1,10 @@
+import http from 'http';
 import makeWASocket, {
   useMultiFileAuthState,
   DisconnectReason,
   downloadMediaMessage
 } from '@whiskeysockets/baileys';
 import pino from 'pino';
-import qrcode from 'qrcode-terminal';
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import axios from 'axios';
 import dotenv from 'dotenv';
@@ -14,22 +14,36 @@ dotenv.config();
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 const SHEET_URL = process.env.SHEET_WEBAPP_URL;
 
+// ==========================================
+// 1. DUMMY HTTP SERVER (Wajib untuk Railway agar tidak SIGTERM)
+// ==========================================
+const port = process.env.PORT || 3000;
+http.createServer((req, res) => {
+  res.writeHead(200, { 'Content-Type': 'text/plain' });
+  res.end('Bot Keuangan WhatsApp Aktif 24 Jam');
+}).listen(port, () => {
+  console.log(`[INFO] Server HTTP dummy aktif pada port ${port}`);
+});
+
+// Helper Format Tanggal & Rupiah
 function getNow() {
   const d = new Date();
   const pad = (n) => String(n).padStart(2, '0');
   const tanggal = `${pad(d.getDate())}/${pad(d.getMonth() + 1)}/${d.getFullYear()}`;
-  const waktu = `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+  const waktu = `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds()}`;
   return { tanggal, waktu };
 }
 
 const formatRupiah = (num) => `Rp ${Number(num || 0).toLocaleString('id-ID')}`;
 
-// 1. Ekstraksi Foto Struk menggunakan Gemini Vision
+// ==========================================
+// 2. PARSER FOTO STRUK (GEMINI AI)
+// ==========================================
 async function parseReceipt(buffer) {
   const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
   const prompt = `
   Analisis struk belanja ini. Ambil total pembayaran, kategori belanja, dan rincian singkat merchant/barang.
-  Keluarkan HANYA JSON murni tanpa markdown:
+  Keluarkan HANYA format JSON murni tanpa markdown:
   {
     "nominal": 0,
     "kategori": "Makanan / Belanja / Transport / Tagihan / Hiburan",
@@ -49,7 +63,9 @@ async function parseReceipt(buffer) {
   return JSON.parse(cleanJson);
 }
 
-// 2. Simpan Data Transaksi ke Google Sheets
+// ==========================================
+// 3. SIMPAN KE GOOGLE SHEETS
+// ==========================================
 async function saveToSheet(tipe, nominal, kategori, keterangan) {
   const { tanggal, waktu } = getNow();
   await axios.post(SHEET_URL, {
@@ -64,7 +80,9 @@ async function saveToSheet(tipe, nominal, kategori, keterangan) {
   return { tanggal, waktu };
 }
 
-// 3. Kalkulasi Real-Time (Total Seluruh Transaksi & Khusus Hari Ini)
+// ==========================================
+// 4. HITUNG STATISTIK REAL-TIME & HARI INI
+// ==========================================
 async function calculateRealtimeStats() {
   const res = await axios.post(SHEET_URL, { action: "report" });
   const rows = res.data?.data || [];
@@ -117,7 +135,9 @@ async function calculateRealtimeStats() {
   };
 }
 
-// 4. Parser Multi-baris Transaksi (+ / -)
+// ==========================================
+// 5. PARSER TRANSAKSI MANUAL (+ / -)
+// ==========================================
 function parseTransactionLines(text) {
   const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
   const items = [];
@@ -141,31 +161,31 @@ function parseTransactionLines(text) {
   return items;
 }
 
-// 5. Inisialisasi Koneksi WhatsApp
-// 5. Inisialisasi Koneksi WhatsApp
+// ==========================================
+// 6. INISIALISASI BOT BAILEYS
+// ==========================================
 async function startBot() {
   const { state, saveCreds } = await useMultiFileAuthState('./auth_info');
 
   const sock = makeWASocket({
     auth: state,
     logger: pino({ level: 'silent' }),
-    printQRInTerminal: false, // Tidak perlu cetak QR rusak di log
+    printQRInTerminal: false, // QR dimatikan agar log bersih
     browser: ['Ubuntu', 'Chrome', '20.0.04'],
     syncFullHistory: false
   });
 
-  // Fitur Pairing Code (gantikan QR scan)
+  // Fitur Pairing Code jika belum ada sesi login
   if (!sock.authState.creds.registered) {
-    // Ganti nomor ini dengan nomor WhatsApp yang ingin dijadikan bot
-    // Format: awalan 62 tanpa tanda + atau spasi, contoh: "6281234567890"
-    const nomorWA = "628xxxxxxxxxx"; 
+    // GANTI DENGAN NOMOR HP BOT ANDA (Format 62xxxxxxxxxx tanpa spasi atau tanda +)
+    const nomorWA = "6289677640957"; 
 
     setTimeout(async () => {
       try {
         const code = await sock.requestPairingCode(nomorWA);
-        console.log(`\n\n====================================`);
+        console.log(`\n====================================`);
         console.log(`👉 KODE PAIRING ANDA: ${code}`);
-        console.log(`====================================\n\n`);
+        console.log(`====================================\n`);
       } catch (err) {
         console.error("Gagal meminta pairing code:", err);
       }
@@ -184,7 +204,6 @@ async function startBot() {
 
   sock.ev.on('creds.update', saveCreds);
 
-
   sock.ev.on('messages.upsert', async ({ messages, type }) => {
     if (type !== 'notify') return;
     const msg = messages[0];
@@ -198,9 +217,9 @@ async function startBot() {
     const isImage = Boolean(msg.message.imageMessage);
 
     try {
-      // 1. Fitur Foto Struk Otomatis
+      // 1. Ekstraksi Foto Struk
       if (isImage) {
-        await sock.sendMessage(targetChat, { text: '⏳ Sedang menganalisis struk belanja...' });
+        await sock.sendMessage(targetChat, { text: '⏳ Sedang membaca struk belanja Anda...' });
         const buffer = await downloadMediaMessage(msg, 'buffer', {});
         const result = await parseReceipt(buffer);
 
@@ -225,34 +244,31 @@ async function startBot() {
 
       // 2. Menu Bantuan
       if (lower === 'menu' || lower === 'help' || lower === 'halo') {
-        const menuText = `🤖 *Panduan Format Bot Keuangan*\n\n` +
+        const menuText = `🤖 *Panduan Bot Keuangan*\n\n` +
                          `1. *Catat 1 Transaksi:*\n` +
                          `   • \`-20000 Makan lalapan\`\n` +
                          `   • \`+500000 Gaji sampingan\`\n\n` +
-                         `2. *Catat Banyak Transaksi Sekaligus (Baris Baru):*\n` +
+                         `2. *Catat Sekaligus (Baris Baru):*\n` +
                          `   \`-15000 Kopi\`\n` +
                          `   \`-30000 Bensin\`\n\n` +
                          `3. *Foto Struk:*\n` +
-                         `   Kirim langsung foto struk fisik Anda.\n\n` +
-                         `4. *Laporan Lengkap:*\n` +
-                         `   Ketik: \`laporan hari\`, \`laporan bulan\`, atau \`laporan tahun\``;
+                         `   Kirimkan langsung foto struk fisik belanjaan.\n\n` +
+                         `4. *Laporan:* Kirim \`laporan hari\`, \`laporan bulan\`, atau \`laporan tahun\``;
         await sock.sendMessage(targetChat, { text: menuText });
         return;
       }
 
-      // 3. Catat Manual (+ / -) Tunggal maupun Multi-baris
+      // 3. Parser Multi-baris Transaksi
       const transactions = parseTransactionLines(bodyText);
 
       if (transactions.length > 0) {
-        // Simpan semua baris ke Sheets
         for (const t of transactions) {
           await saveToSheet(t.tipe, t.nominal, t.kategori, t.keterangan);
         }
 
-        // Ambil kalkulasi real-time setelah data tersimpan
         const stats = await calculateRealtimeStats();
 
-        // KASUS A: Multi-transaksi (lebih dari 1 baris)
+        // Kasus Banyak Transaksi Sekaligus
         if (transactions.length > 1) {
           let detailBaris = transactions
             .map(t => `• ${t.keterangan}: ${formatRupiah(t.nominal)} (${t.tipe})`)
@@ -270,11 +286,10 @@ async function startBot() {
           return;
         }
 
-        // KASUS B: 1 Transaksi Saja
+        // Kasus 1 Transaksi Saja
         const single = transactions[0];
 
         if (single.tipe === 'Pemasukan') {
-          // Saldo awal sebelum pemasukan ini masuk
           const saldoAwal = stats.saldoTotal - single.nominal;
 
           const replyPemasukan = `💰 *Pemasukan Berhasil Dicatat!*\n` +
@@ -307,8 +322,8 @@ async function startBot() {
       }
 
     } catch (err) {
-      console.error("Error proses pesan:", err);
-      await sock.sendMessage(targetChat, { text: '⚠️ Terjadi kesalahan saat memproses data. Cek log terminal bot.' });
+      console.error("Error memproses pesan:", err);
+      await sock.sendMessage(targetChat, { text: '⚠️ Terjadi kesalahan saat memproses data. Cek log server.' });
     }
   });
 }
