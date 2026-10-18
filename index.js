@@ -142,23 +142,38 @@ function parseTransactionLines(text) {
 }
 
 // 5. Inisialisasi Koneksi WhatsApp
+// 5. Inisialisasi Koneksi WhatsApp
 async function startBot() {
   const { state, saveCreds } = await useMultiFileAuthState('./auth_info');
 
   const sock = makeWASocket({
     auth: state,
     logger: pino({ level: 'silent' }),
-    printQRInTerminal: false,
-    browser: ['Windows', 'Chrome', '122.0.6261.129'],
+    printQRInTerminal: false, // Tidak perlu cetak QR rusak di log
+    browser: ['Ubuntu', 'Chrome', '20.0.04'],
     syncFullHistory: false
   });
 
+  // Fitur Pairing Code (gantikan QR scan)
+  if (!sock.authState.creds.registered) {
+    // Ganti nomor ini dengan nomor WhatsApp yang ingin dijadikan bot
+    // Format: awalan 62 tanpa tanda + atau spasi, contoh: "6281234567890"
+    const nomorWA = "628xxxxxxxxxx"; 
+
+    setTimeout(async () => {
+      try {
+        const code = await sock.requestPairingCode(nomorWA);
+        console.log(`\n\n====================================`);
+        console.log(`👉 KODE PAIRING ANDA: ${code}`);
+        console.log(`====================================\n\n`);
+      } catch (err) {
+        console.error("Gagal meminta pairing code:", err);
+      }
+    }, 4000);
+  }
+
   sock.ev.on('connection.update', (update) => {
-    const { connection, lastDisconnect, qr } = update;
-    if (qr) {
-      console.log('\nSilakan scan QR Code WhatsApp:\n');
-      qrcode.generate(qr, { small: true });
-    }
+    const { connection, lastDisconnect } = update;
     if (connection === 'close') {
       const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
       if (shouldReconnect) startBot();
@@ -168,6 +183,7 @@ async function startBot() {
   });
 
   sock.ev.on('creds.update', saveCreds);
+
 
   sock.ev.on('messages.upsert', async ({ messages, type }) => {
     if (type !== 'notify') return;
