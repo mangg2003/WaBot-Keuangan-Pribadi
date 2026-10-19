@@ -27,7 +27,7 @@ http.createServer((req, res) => {
   console.log(`[INFO] Server HTTP dummy aktif pada port ${port}`);
 });
 
-// Helper Tanggal & Waktu WIB
+// Helper Tanggal & Waktu WIB (Asia/Jakarta)
 function getWIBDate() {
   const now = new Date();
   const tanggal = new Intl.DateTimeFormat('id-ID', {
@@ -68,88 +68,7 @@ function clearAuthFolder(folderPath = './auth_info') {
 }
 
 // ==========================================
-// 2. STATE DATABASE LOKAL (Anti Salah Hitung)
-// ==========================================
-const STATE_FILE = './finance_state.json';
-
-function getFinancialState() {
-  const { tanggal: today } = getWIBDate();
-  const defaultState = {
-    lastDate: today,
-    saldoTotal: 0,
-    totalMasuk: 0,
-    totalKeluar: 0,
-    masukHariIni: 0,
-    keluarHariIni: 0,
-    totalTransaksi: 0
-  };
-
-  try {
-    if (fs.existsSync(STATE_FILE)) {
-      const parsed = JSON.parse(fs.readFileSync(STATE_FILE, 'utf-8'));
-      // Reset akumulasi harian jika tanggal berganti
-      if (parsed.lastDate !== today) {
-        parsed.lastDate = today;
-        parsed.masukHariIni = 0;
-        parsed.keluarHariIni = 0;
-        fs.writeFileSync(STATE_FILE, JSON.stringify(parsed, null, 2));
-      }
-      return parsed;
-    }
-  } catch (err) {
-    console.error('Gagal baca finance_state:', err.message);
-  }
-
-  fs.writeFileSync(STATE_FILE, JSON.stringify(defaultState, null, 2));
-  return defaultState;
-}
-
-function updateFinancialState(tipe, nominal) {
-  const state = getFinancialState();
-  nominal = Number(nominal) || 0;
-
-  state.totalTransaksi += 1;
-
-  if (tipe === 'Pemasukan') {
-    state.saldoTotal += nominal;
-    state.totalMasuk += nominal;
-    state.masukHariIni += nominal;
-  } else if (tipe === 'Pengeluaran') {
-    state.saldoTotal -= nominal;
-    state.totalKeluar += nominal;
-    state.keluarHariIni += nominal;
-  }
-
-  fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2));
-  return state;
-}
-
-function setManualState(saldoTotal, masukHariIni, keluarHariIni, totalMasuk, totalKeluar, totalTrx) {
-  const { tanggal: today } = getWIBDate();
-  const state = {
-    lastDate: today,
-    saldoTotal: Number(saldoTotal) || 0,
-    totalMasuk: Number(totalMasuk) || 0,
-    totalKeluar: Number(totalKeluar) || 0,
-    masukHariIni: Number(masukHariIni) || 0,
-    keluarHariIni: Number(keluarHariIni) || 0,
-    totalTransaksi: Number(totalTrx) || 0
-  };
-  fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2));
-  return state;
-}
-
-// Inisialisasi awal nilai saat bot pertama kali jalan jika file state masih kosong
-(() => {
-  const cur = getFinancialState();
-  if (cur.totalTransaksi === 0) {
-    // Sinkronkan awal dengan 3 transaksi di gambar: 50.000 - 13.500 - 10.000 = 26.500
-    setManualState(26500, 50000, 23500, 50000, 23500, 3);
-  }
-})();
-
-// ==========================================
-// 3. PARSER FOTO STRUK (GEMINI AI)
+// 2. PARSER FOTO STRUK (GEMINI AI)
 // ==========================================
 async function parseReceipt(buffer) {
   if (!GEMINI_KEY) throw new Error("GEMINI_API_KEY belum diisi");
@@ -178,35 +97,83 @@ async function parseReceipt(buffer) {
 }
 
 // ==========================================
-// 4. SIMPAN KE GOOGLE SHEETS
+// 3. KOMUNIKASI GOOGLE APPS SCRIPT
 // ==========================================
-async function saveToSheet(tipe, nominal, kategori, keterangan) {
-  if (!SHEET_URL) return;
-  const { tanggal, waktu } = getWIBDate();
-  try {
-    await axios.post(
-      SHEET_URL.trim(),
-      {
-        action: "add",
-        tanggal,
-        waktu,
-        tipe,
-        kategori,
-        nominal: Number(nominal),
-        keterangan
-      },
-      {
-        maxRedirects: 5,
-        headers: { 'Content-Type': 'application/json' }
-      }
-    );
-  } catch (err) {
-    console.error("Gagal simpan ke Google Sheets:", err.message);
+async function callSheetsAPI(payload) {
+  if (!SHEET_URL) throw new Error("Variabel SHEET_WEBAPP_URL kosong!");
+  const res = await axios.post(SHEET_URL.trim(), payload, {
+    maxRedirects: 5,
+    headers: { 'Content-Type': 'application/json' }
+  });
+  let data = res.data;
+  if (typeof data === 'string') {
+    try { data = JSON.parse(data); } catch (e) {}
   }
+  return data;
+}
+
+// Hitung total murni dari seluruh baris data di spreadsheet
+async function getAccurateStats() {
+  const res = await callSheetsAPI({ action: "report" });
+
+  let rows = res?.data || res || [];
+  if (typeof rows === 'string') {
+    try { rows = JSON.parse(rows); } catch (e) {}
+    rows = rows?.data || rows || [];
+  }
+
+  // Jika Apps Script langsung mengembalikan objek statistik hasil kalkulasi server
+  if (res && typeof res.saldoTotal === 'number' && typeof res.totalKeluar === 'number') {
+    return res;
+  }
+
+  let totalMasuk = 0;
+  let totalKeluar = 0;
+  let masukHariIni = 0;
+  let keluarHariIni = 0;
+  let totalTransaksi = 0;
+
+  if (Array.isArray(rows) && rows.length > 1) {
+    const { tanggal: todayStr } = getWIBDate();
+    const dayToday = todayStr.split('/')[0];
+
+    for (let i = 1; i < rows.length; i++) {
+      const r = rows[i];
+      if (!Array.isArray(r) || r.length === 0) continue;
+
+      const rawNom = String(r[4] || '').replace(/[^0-9]/g, '');
+      const nominal = parseInt(rawNom, 10) || 0;
+      if (nominal <= 0) continue;
+
+      totalTransaksi++;
+
+      const tipe = String(r[2] || '').toLowerCase().trim();
+      const rawDate = String(r[0] || '').trim();
+
+      const isToday = rawDate.includes(todayStr) || (rawDate.includes(dayToday) && rawDate.includes('2026'));
+
+      if (tipe.includes('masuk')) {
+        totalMasuk += nominal;
+        if (isToday) masukHariIni += nominal;
+      } else if (tipe.includes('keluar')) {
+        totalKeluar += nominal;
+        if (isToday) keluarHariIni += nominal;
+      }
+    }
+  }
+
+  return {
+    saldoTotal: totalMasuk - totalKeluar,
+    totalMasuk,
+    totalKeluar,
+    masukHariIni,
+    keluarHariIni,
+    totalTransaksi
+  };
 }
 
 // ==========================================
-// 5. PARSER TRANSAKSI MANUAL (+ / -)
+// 4. PARSER TRANSAKSI MANUAL (+ / -)
 // ==========================================
 function parseTransactionLines(text) {
   const lines = text.split('\n').map((l) => l.trim()).filter(Boolean);
@@ -238,7 +205,7 @@ function parseTransactionLines(text) {
 }
 
 // ==========================================
-// 6. INISIALISASI BOT BAILEYS
+// 5. INISIALISASI BOT BAILEYS
 // ==========================================
 async function startBot() {
   const { state, saveCreds } = await useMultiFileAuthState('./auth_info');
@@ -261,7 +228,7 @@ async function startBot() {
       pairingRequested = true;
       try {
         const code = await sock.requestPairingCode(nomorWA);
-        console.log(`\n👉 KODE PAIRING ANDA: ${code}\n`);
+        console.log(`\n👉 KODE PAIRING: ${code}\n`);
       } catch (err) {
         console.error("Gagal meminta pairing code:", err);
         pairingRequested = false;
@@ -307,8 +274,18 @@ async function startBot() {
         const buffer = await downloadMediaMessage(msg, 'buffer', {});
         const result = await parseReceipt(buffer);
 
-        const stats = updateFinancialState("Pengeluaran", result.nominal);
-        saveToSheet("Pengeluaran", result.nominal, result.kategori, result.keterangan);
+        const { tanggal, waktu } = getWIBDate();
+        await callSheetsAPI({
+          action: "add",
+          tanggal,
+          waktu,
+          tipe: "Pengeluaran",
+          kategori: result.kategori,
+          nominal: Number(result.nominal),
+          keterangan: result.keterangan
+        });
+
+        const stats = await getAccurateStats();
 
         const reply =
           `🧾 *Struk Berhasil Dicatat!*\n` +
@@ -345,7 +322,7 @@ async function startBot() {
 
       // 3. Perintah Cek Saldo
       if (lower === 'saldo' || lower === 'cek saldo' || lower === 'rekap') {
-        const stats = getFinancialState();
+        const stats = await getAccurateStats();
         const replySaldo =
           `💵 *Ringkasan Saldo Keuangan*\n` +
           `━━━━━━━━━━━━━━━━━\n` +
@@ -365,13 +342,21 @@ async function startBot() {
       const transactions = parseTransactionLines(bodyText);
 
       if (transactions.length > 0) {
-        let stats = null;
-        const saldoAwal = getFinancialState().saldoTotal;
+        const { tanggal, waktu } = getWIBDate();
 
         for (const t of transactions) {
-          stats = updateFinancialState(t.tipe, t.nominal);
-          saveToSheet(t.tipe, t.nominal, t.kategori, t.keterangan);
+          await callSheetsAPI({
+            action: "add",
+            tanggal,
+            waktu,
+            tipe: t.tipe,
+            kategori: t.kategori,
+            nominal: Number(t.nominal),
+            keterangan: t.keterangan
+          });
         }
+
+        const stats = await getAccurateStats();
 
         // Multi-baris
         if (transactions.length > 1) {
@@ -396,6 +381,8 @@ async function startBot() {
         const single = transactions[0];
 
         if (single.tipe === 'Pemasukan') {
+          const saldoAwal = stats.saldoTotal - single.nominal;
+
           const replyPemasukan =
             `💰 *Pemasukan Berhasil Dicatat!*\n` +
             `━━━━━━━━━━━━━━━━━\n` +
