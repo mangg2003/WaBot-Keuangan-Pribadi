@@ -17,7 +17,7 @@ const GEMINI_KEY = process.env.GEMINI_API_KEY;
 const SHEET_URL = process.env.SHEET_WEBAPP_URL;
 
 // ==========================================
-// 1. DUMMY HTTP SERVER (Wajib untuk Railway)
+// 1. DUMMY HTTP SERVER (Railway Keep-Alive)
 // ==========================================
 const port = process.env.PORT || 3000;
 http.createServer((req, res) => {
@@ -27,7 +27,7 @@ http.createServer((req, res) => {
   console.log(`[INFO] Server HTTP dummy aktif pada port ${port}`);
 });
 
-// Helper Format Waktu & Rupiah
+// Helper Tanggal & Waktu WIB
 function getWIBDate() {
   const now = new Date();
   const tanggal = new Intl.DateTimeFormat('id-ID', {
@@ -63,7 +63,7 @@ function clearAuthFolder(folderPath = './auth_info') {
       }
     }
   } catch (err) {
-    console.error('Gagal membersihkan auth_info:', err.message);
+    console.error('Gagal clear auth_info:', err.message);
   }
 }
 
@@ -99,7 +99,7 @@ async function parseReceipt(buffer) {
 // ==========================================
 // 3. KOMUNIKASI GOOGLE SHEETS
 // ==========================================
-async function sendToSheet(payload) {
+async function callSheetsAPI(payload) {
   if (!SHEET_URL) throw new Error("Variabel SHEET_WEBAPP_URL kosong!");
 
   const res = await axios.post(SHEET_URL.trim(), payload, {
@@ -170,9 +170,7 @@ async function startBot() {
       pairingRequested = true;
       try {
         const code = await sock.requestPairingCode(nomorWA);
-        console.log(`\n====================================`);
-        console.log(`👉 KODE PAIRING ANDA: ${code}`);
-        console.log(`====================================\n`);
+        console.log(`\n👉 KODE PAIRING ANDA: ${code}\n`);
       } catch (err) {
         console.error("Gagal meminta pairing code:", err);
         pairingRequested = false;
@@ -184,7 +182,7 @@ async function startBot() {
       const isLoggedOut = statusCode === DisconnectReason.loggedOut || statusCode === 401;
       const shouldReconnect = !isLoggedOut;
 
-      console.log(`Koneksi terputus (status: ${statusCode}). Reconnect: ${shouldReconnect}`);
+      console.log(`Koneksi putus (${statusCode}). Reconnect: ${shouldReconnect}`);
 
       if (isLoggedOut) {
         clearAuthFolder('./auth_info');
@@ -221,7 +219,7 @@ async function startBot() {
         const result = await parseReceipt(buffer);
 
         const { tanggal, waktu } = getWIBDate();
-        const stats = await sendToSheet({
+        const stats = await callSheetsAPI({
           action: "add",
           tanggal,
           waktu,
@@ -267,8 +265,8 @@ async function startBot() {
       }
 
       // 3. Perintah Cek Saldo
-      if (lower === 'saldo' || lower === 'cek saldo' || lower === 'laporan' || lower === 'rekap') {
-        const stats = await sendToSheet({ action: "report" });
+      if (lower === 'saldo' || lower === 'cek saldo' || lower === 'rekap') {
+        const stats = await callSheetsAPI({ action: "report" });
         const replySaldo =
           `💵 *Ringkasan Saldo Keuangan*\n` +
           `━━━━━━━━━━━━━━━━━\n` +
@@ -284,7 +282,7 @@ async function startBot() {
         return;
       }
 
-      // 4. Parser Transaksi Manual (+ / -)
+      // 4. Parser Transaksi Manual
       const transactions = parseTransactionLines(bodyText);
 
       if (transactions.length > 0) {
@@ -292,7 +290,7 @@ async function startBot() {
         const { tanggal, waktu } = getWIBDate();
 
         for (const t of transactions) {
-          stats = await sendToSheet({
+          stats = await callSheetsAPI({
             action: "add",
             tanggal,
             waktu,
