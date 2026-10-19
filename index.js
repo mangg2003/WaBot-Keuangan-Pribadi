@@ -30,7 +30,6 @@ http.createServer((req, res) => {
 // Helper Format Tanggal & Waktu WIB (Asia/Jakarta)
 function getWIBDate() {
   const now = new Date();
-  // Format Tanggal: DD/MM/YYYY
   const tanggal = new Intl.DateTimeFormat('id-ID', {
     timeZone: 'Asia/Jakarta',
     day: '2-digit',
@@ -38,7 +37,6 @@ function getWIBDate() {
     year: 'numeric'
   }).format(now);
 
-  // Format Waktu: HH:mm:ss
   const waktu = new Intl.DateTimeFormat('id-ID', {
     timeZone: 'Asia/Jakarta',
     hour: '2-digit',
@@ -168,14 +166,23 @@ async function calculateRealtimeStats() {
         if (!r || r.length === 0) return;
 
         const rawDate = r[0];
-        const tipe = String(r[2] || '').toLowerCase().trim();
-        const nominal = parseInt(String(r[4] || '0').replace(/[^0-9]/g, ''), 10) || 0;
+        const rowString = r.map((c) => String(c || '').toLowerCase().trim()).join(' ');
+
+        let nominal = parseInt(String(r[4] || '0').replace(/[^0-9]/g, ''), 10) || 0;
+        if (nominal <= 0) {
+          for (let i = 1; i < r.length; i++) {
+            const val = parseInt(String(r[i] || '').replace(/[^0-9]/g, ''), 10);
+            if (!isNaN(val) && val > 0 && !String(r[i]).includes(':') && !String(r[i]).includes('/')) {
+              nominal = val;
+              break;
+            }
+          }
+        }
 
         if (nominal <= 0) return;
 
         totalTransaksi += 1;
 
-        // Normalisasi tanggal untuk pencocokan Hari Ini
         let isToday = false;
         if (rawDate) {
           const strDate = String(rawDate).trim();
@@ -184,7 +191,6 @@ async function calculateRealtimeStats() {
           } else {
             const dObj = new Date(rawDate);
             if (!isNaN(dObj.getTime())) {
-              // Format ke tanggal WIB
               const rowDateWIB = new Intl.DateTimeFormat('id-ID', {
                 timeZone: 'Asia/Jakarta',
                 day: '2-digit',
@@ -196,10 +202,13 @@ async function calculateRealtimeStats() {
           }
         }
 
-        if (tipe.includes('masuk')) {
+        const isKeluar = rowString.includes('keluar') || String(r[2] || '').toLowerCase().includes('keluar');
+        const isMasuk = rowString.includes('masuk') || String(r[2] || '').toLowerCase().includes('masuk');
+
+        if (isMasuk) {
           totalMasuk += nominal;
           if (isToday) masukHariIni += nominal;
-        } else if (tipe.includes('keluar')) {
+        } else if (isKeluar) {
           totalKeluar += nominal;
           if (isToday) keluarHariIni += nominal;
         }
@@ -326,7 +335,6 @@ async function startBot() {
         const buffer = await downloadMediaMessage(msg, 'buffer', {});
         const result = await parseReceipt(buffer);
 
-        // Ambil kalkulasi sebelum simpan
         const currentStats = await calculateRealtimeStats();
         await saveToSheet("Pengeluaran", result.nominal, result.kategori, result.keterangan);
 
@@ -390,15 +398,12 @@ async function startBot() {
       const transactions = parseTransactionLines(bodyText);
 
       if (transactions.length > 0) {
-        // Ambil kalkulasi basis dari sheet
         const currentStats = await calculateRealtimeStats();
 
-        // Simpan baris transaksi ke Google Sheets
         for (const t of transactions) {
           await saveToSheet(t.tipe, t.nominal, t.kategori, t.keterangan);
         }
 
-        // Akumulasikan secara deterministik
         let deltaMasuk = 0;
         let deltaKeluar = 0;
         transactions.forEach((t) => {
