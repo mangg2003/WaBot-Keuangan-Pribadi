@@ -97,14 +97,16 @@ async function parseReceipt(buffer) {
 }
 
 // ==========================================
-// 3. KOMUNIKASI GOOGLE SHEETS
+// 3. KOMUNIKASI GOOGLE SHEETS DENGAN RETRY
 // ==========================================
 async function callSheets(payload) {
   if (!SHEET_URL) throw new Error("Variabel SHEET_WEBAPP_URL kosong!");
+  
   const res = await axios.post(SHEET_URL.trim(), payload, {
     maxRedirects: 5,
     headers: { 'Content-Type': 'application/json' }
   });
+
   let data = res.data;
   if (typeof data === 'string') {
     try { data = JSON.parse(data); } catch (e) {}
@@ -113,15 +115,14 @@ async function callSheets(payload) {
 }
 
 // ==========================================
-// 4. HITUNG STATISTIK LANGSUNG DARI SHEET
+// 4. HITUNG STATISTIK DATABASE
 // ==========================================
-async function syncDatabaseStats() {
+async function fetchCurrentTotals() {
   const res = await callSheets({ action: "report" });
 
-  let rows = res?.data || res || [];
+  let rows = res?.data || [];
   if (typeof rows === 'string') {
     try { rows = JSON.parse(rows); } catch (e) {}
-    rows = rows?.data || rows || [];
   }
 
   let totalMasuk = 0;
@@ -132,24 +133,25 @@ async function syncDatabaseStats() {
 
   if (Array.isArray(rows) && rows.length > 1) {
     const { tanggal: todayStr } = getWIBDate();
-    const dayToday = todayStr.split('/')[0];
+    const [todayD, todayM, todayY] = todayStr.split('/');
 
     for (let i = 1; i < rows.length; i++) {
       const r = rows[i];
       if (!Array.isArray(r) || r.length === 0) continue;
 
-      // Ambil angka dari kolom Nominal (indeks 4)
       const cleanNom = String(r[4] || '').replace(/[^0-9]/g, '');
       const nominal = parseInt(cleanNom, 10) || 0;
       if (nominal <= 0) continue;
 
       totalTransaksi++;
 
-      const tipeStr = String(r[2] || '').toLowerCase().trim();
-      const rawDate = String(r[0] || '').trim();
+      const fullText = r.map((c) => String(c || '').toLowerCase()).join(' ');
+      const isKeluar = fullText.includes('keluar') || String(r[2] || '').toLowerCase().includes('keluar');
+      const isMasuk = fullText.includes('masuk') || String(r[2] || '').toLowerCase().includes('masuk');
 
-      // Cek apakah tanggal hari ini
-      let isToday = rawDate.includes(todayStr) || (rawDate.includes(dayToday) && rawDate.includes('2026'));
+      const rawDate = String(r[0] || '').trim();
+      let isToday = rawDate.includes(todayStr) || (rawDate.includes(todayD) && rawDate.includes(todayY));
+
       if (!isToday && rawDate) {
         const d = new Date(rawDate);
         if (!isNaN(d.getTime())) {
@@ -163,10 +165,10 @@ async function syncDatabaseStats() {
         }
       }
 
-      if (tipeStr.includes('masuk')) {
+      if (isMasuk) {
         totalMasuk += nominal;
         if (isToday) masukHariIni += nominal;
-      } else if (tipeStr.includes('keluar')) {
+      } else if (isKeluar) {
         totalKeluar += nominal;
         if (isToday) keluarHariIni += nominal;
       }
@@ -285,7 +287,7 @@ async function startBot() {
         const buffer = await downloadMediaMessage(msg, 'buffer', {});
         const result = await parseReceipt(buffer);
 
-        const current = await syncDatabaseStats();
+        const current = await fetchCurrentTotals();
         const { tanggal, waktu } = getWIBDate();
 
         await callSheets({
@@ -336,7 +338,7 @@ async function startBot() {
 
       // 3. Perintah Cek Saldo
       if (lower === 'saldo' || lower === 'cek saldo' || lower === 'rekap') {
-        const stats = await syncDatabaseStats();
+        const stats = await fetchCurrentTotals();
         const replySaldo =
           `💵 *Ringkasan Saldo Keuangan*\n` +
           `━━━━━━━━━━━━━━━━━\n` +
@@ -352,15 +354,15 @@ async function startBot() {
         return;
       }
 
-      // 4. Parser Transaksi Manual (+ / -)
+      // 4. Parser Transaksi Manual
       const transactions = parseTransactionLines(bodyText);
 
       if (transactions.length > 0) {
-        // Ambil riwayat database yang sudah ada terlebih dahulu
-        const current = await syncDatabaseStats();
+        // Ambil kalkulasi data yang sudah tersimpan di database
+        const current = await fetchCurrentTotals();
         const { tanggal, waktu } = getWIBDate();
 
-        // Tulis baris baru ke Google Sheets
+        // Tulis semua transaksi baru ke spreadsheet
         for (const t of transactions) {
           await callSheets({
             action: "add",
@@ -373,7 +375,7 @@ async function startBot() {
           });
         }
 
-        // Kalkulasi mutlak (saldo riwayat + input saat ini)
+        // Akumulasikan perubahan
         let deltaMasuk = 0;
         let deltaKeluar = 0;
         transactions.forEach((t) => {
