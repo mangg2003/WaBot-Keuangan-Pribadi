@@ -17,7 +17,7 @@ const GEMINI_KEY = process.env.GEMINI_API_KEY;
 const SHEET_URL = process.env.SHEET_WEBAPP_URL;
 
 // ==========================================
-// 1. DUMMY HTTP SERVER (Railway Keep-Alive)
+// 1. DUMMY HTTP SERVER (Keep-Alive Railway)
 // ==========================================
 const port = process.env.PORT || 3000;
 http.createServer((req, res) => {
@@ -27,7 +27,7 @@ http.createServer((req, res) => {
   console.log(`[INFO] Server HTTP dummy aktif pada port ${port}`);
 });
 
-// Helper Tanggal & Waktu WIB
+// Helper Tanggal & Waktu WIB (Asia/Jakarta)
 function getWIBDate() {
   const now = new Date();
   const tanggal = new Intl.DateTimeFormat('id-ID', {
@@ -99,14 +99,12 @@ async function parseReceipt(buffer) {
 // ==========================================
 // 3. KOMUNIKASI GOOGLE SHEETS
 // ==========================================
-async function callSheetsAPI(payload) {
+async function postSheet(payload) {
   if (!SHEET_URL) throw new Error("Variabel SHEET_WEBAPP_URL kosong!");
-
   const res = await axios.post(SHEET_URL.trim(), payload, {
     maxRedirects: 5,
     headers: { 'Content-Type': 'application/json' }
   });
-
   let data = res.data;
   if (typeof data === 'string') {
     try { data = JSON.parse(data); } catch (e) {}
@@ -115,7 +113,86 @@ async function callSheetsAPI(payload) {
 }
 
 // ==========================================
-// 4. PARSER TRANSAKSI MANUAL (+ / -)
+// 4. HITUNG STATISTIK LANGSUNG
+// ==========================================
+async function getFinancialStats() {
+  const res = await postSheet({ action: "report" });
+  
+  // Jika Apps Script langsung mengembalikan ringkasan saldo yang valid
+  if (res && typeof res.saldoTotal === 'number' && (res.totalKeluar > 0 || res.totalMasuk > 0)) {
+    return res;
+  }
+
+  // Fallback: hitung mandiri dari array baris mentah
+  let rows = res?.data || res || [];
+  if (typeof rows === 'string') {
+    try { rows = JSON.parse(rows); } catch (e) {}
+    rows = rows?.data || rows || [];
+  }
+
+  let totalMasuk = 0;
+  let totalKeluar = 0;
+  let masukHariIni = 0;
+  let keluarHariIni = 0;
+  let totalTransaksi = 0;
+
+  if (Array.isArray(rows) && rows.length > 1) {
+    const { tanggal: todayStr } = getWIBDate();
+    const dayTarget = todayStr.split('/')[0];
+
+    for (let i = 1; i < rows.length; i++) {
+      const r = rows[i];
+      if (!Array.isArray(r) || r.length === 0) continue;
+
+      const rawDate = String(r[0] || '').trim();
+      const rawNominal = String(r[4] || '').replace(/[^0-9]/g, '');
+      const nominal = parseInt(rawNominal, 10) || 0;
+      if (nominal <= 0) continue;
+
+      totalTransaksi++;
+
+      // Cari tipe
+      const strRow = r.map((c) => String(c || '').toLowerCase()).join(' ');
+      const isKeluar = strRow.includes('keluar');
+      const isMasuk = strRow.includes('masuk');
+
+      // Cek apakah tanggal hari ini
+      let isToday = rawDate.includes(todayStr) || rawDate.includes(dayTarget);
+      if (!isToday && rawDate) {
+        const d = new Date(rawDate);
+        if (!isNaN(d.getTime())) {
+          const dStr = new Intl.DateTimeFormat('id-ID', {
+            timeZone: 'Asia/Jakarta',
+            day: '2-digit',
+            month: '2-digit',
+            year: 'numeric'
+          }).format(d);
+          isToday = (dStr === todayStr);
+        }
+      }
+
+      if (isMasuk) {
+        totalMasuk += nominal;
+        if (isToday) masukHariIni += nominal;
+      } else if (isKeluar) {
+        totalKeluar += nominal;
+        if (isToday) keluarHariIni += nominal;
+      }
+    }
+  }
+
+  return {
+    saldoTotal: totalMasuk - totalKeluar,
+    totalMasuk,
+    totalKeluar,
+    masukHariIni,
+    keluarHariIni,
+    totalTransaksi
+  };
+}
+
+// ==========================================
+// 5. PARSER TRANSAKSI MANUAL (+ / -)
 // ==========================================
 function parseTransactionLines(text) {
   const lines = text.split('\n').map((l) => l.trim()).filter(Boolean);
@@ -147,7 +224,7 @@ function parseTransactionLines(text) {
 }
 
 // ==========================================
-// 5. INISIALISASI BOT BAILEYS
+// 6. INISIALISASI BOT BAILEYS
 // ==========================================
 async function startBot() {
   const { state, saveCreds } = await useMultiFileAuthState('./auth_info');
@@ -181,8 +258,6 @@ async function startBot() {
       const statusCode = lastDisconnect?.error?.output?.statusCode;
       const isLoggedOut = statusCode === DisconnectReason.loggedOut || statusCode === 401;
       const shouldReconnect = !isLoggedOut;
-
-      console.log(`Koneksi putus (${statusCode}). Reconnect: ${shouldReconnect}`);
 
       if (isLoggedOut) {
         clearAuthFolder('./auth_info');
@@ -218,8 +293,10 @@ async function startBot() {
         const buffer = await downloadMediaMessage(msg, 'buffer', {});
         const result = await parseReceipt(buffer);
 
+        const current = await getFinancialStats();
         const { tanggal, waktu } = getWIBDate();
-        const stats = await callSheetsAPI({
+
+        await postSheet({
           action: "add",
           tanggal,
           waktu,
@@ -229,6 +306,9 @@ async function startBot() {
           keterangan: result.keterangan
         });
 
+        const saldoFinal = current.saldoTotal - result.nominal;
+        const keluarFinal = current.keluarHariIni + result.nominal;
+
         const reply =
           `🧾 *Struk Berhasil Dicatat!*\n` +
           `━━━━━━━━━━━━━━━━━\n` +
@@ -236,9 +316,9 @@ async function startBot() {
           `📂 Kategori: ${result.kategori}\n` +
           `💸 Pengeluaran: ${formatRupiah(result.nominal)}\n` +
           `━━━━━━━━━━━━━━━━━\n` +
-          `💵 *Saldo Saat Ini:* ${formatRupiah(stats.saldoTotal)}\n` +
-          `🔴 Keluar Hari Ini: ${formatRupiah(stats.keluarHariIni)}\n` +
-          `🟢 Masuk Hari Ini: ${formatRupiah(stats.masukHariIni)}`;
+          `💵 *Saldo Saat Ini:* ${formatRupiah(saldoFinal)}\n` +
+          `🔴 Keluar Hari Ini: ${formatRupiah(keluarFinal)}\n` +
+          `🟢 Masuk Hari Ini: ${formatRupiah(current.masukHariIni)}`;
 
         await sock.sendMessage(targetChat, { text: reply });
         return;
@@ -257,16 +337,14 @@ async function startBot() {
           `   \`-15000 Kopi\`\n` +
           `   \`-30000 Bensin\`\n\n` +
           `3. *Cek Saldo:*\n` +
-          `   Kirim kata \`saldo\`\n\n` +
-          `4. *Foto Struk:*\n` +
-          `   Kirimkan foto fisik struk belanjaan langsung.`;
+          `   Kirim kata \`saldo\``;
         await sock.sendMessage(targetChat, { text: menuText });
         return;
       }
 
       // 3. Perintah Cek Saldo
       if (lower === 'saldo' || lower === 'cek saldo' || lower === 'rekap') {
-        const stats = await callSheetsAPI({ action: "report" });
+        const stats = await getFinancialStats();
         const replySaldo =
           `💵 *Ringkasan Saldo Keuangan*\n` +
           `━━━━━━━━━━━━━━━━━\n` +
@@ -286,11 +364,12 @@ async function startBot() {
       const transactions = parseTransactionLines(bodyText);
 
       if (transactions.length > 0) {
-        let stats = null;
+        // Ambil kalkulasi riwayat sebelum baris baru ditulis
+        const current = await getFinancialStats();
         const { tanggal, waktu } = getWIBDate();
 
         for (const t of transactions) {
-          stats = await callSheetsAPI({
+          await postSheet({
             action: "add",
             tanggal,
             waktu,
@@ -300,6 +379,21 @@ async function startBot() {
             keterangan: t.keterangan
           });
         }
+
+        // Akumulasi langsung secara real-time
+        let deltaMasuk = 0;
+        let deltaKeluar = 0;
+        transactions.forEach((t) => {
+          if (t.tipe === 'Pemasukan') deltaMasuk += t.nominal;
+          if (t.tipe === 'Pengeluaran') deltaKeluar += t.nominal;
+        });
+
+        const saldoFinal = current.saldoTotal + deltaMasuk - deltaKeluar;
+        const masukFinal = current.masukHariIni + deltaMasuk;
+        const keluarFinal = current.keluarHariIni + deltaKeluar;
+        const totalMasukFinal = current.totalMasuk + deltaMasuk;
+        const totalKeluarFinal = current.totalKeluar + deltaKeluar;
+        const totalTrxFinal = current.totalTransaksi + transactions.length;
 
         // Multi-baris
         if (transactions.length > 1) {
@@ -312,9 +406,9 @@ async function startBot() {
             `━━━━━━━━━━━━━━━━━\n` +
             `${detailBaris}\n` +
             `━━━━━━━━━━━━━━━━━\n` +
-            `💵 *Saldo Total:* ${formatRupiah(stats.saldoTotal)}\n` +
-            `🟢 Masuk Hari Ini: ${formatRupiah(stats.masukHariIni)}\n` +
-            `🔴 Keluar Hari Ini: ${formatRupiah(stats.keluarHariIni)}`;
+            `💵 *Saldo Total:* ${formatRupiah(saldoFinal)}\n` +
+            `🟢 Masuk Hari Ini: ${formatRupiah(masukFinal)}\n` +
+            `🔴 Keluar Hari Ini: ${formatRupiah(keluarFinal)}`;
 
           await sock.sendMessage(targetChat, { text: replyMulti });
           return;
@@ -324,19 +418,17 @@ async function startBot() {
         const single = transactions[0];
 
         if (single.tipe === 'Pemasukan') {
-          const saldoAwal = stats.saldoTotal - single.nominal;
-
           const replyPemasukan =
             `💰 *Pemasukan Berhasil Dicatat!*\n` +
             `━━━━━━━━━━━━━━━━━\n` +
-            `💵 *Saldo Total:* ${formatRupiah(stats.saldoTotal)}\n\n` +
+            `💵 *Saldo Total:* ${formatRupiah(saldoFinal)}\n\n` +
             `*Detail:*\n` +
-            `• Saldo Awal: ${formatRupiah(saldoAwal)}\n` +
+            `• Saldo Awal: ${formatRupiah(current.saldoTotal)}\n` +
             `• Pemasukan Baru: ${formatRupiah(single.nominal)} (${single.keterangan})\n` +
-            `• Total Pemasukan: ${formatRupiah(stats.totalMasuk)}\n` +
-            `• Total Pengeluaran: ${formatRupiah(stats.totalKeluar)}\n` +
-            `• Masuk Hari Ini: ${formatRupiah(stats.masukHariIni)}\n` +
-            `• Total Transaksi Database: ${stats.totalTransaksi}`;
+            `• Total Pemasukan: ${formatRupiah(totalMasukFinal)}\n` +
+            `• Total Pengeluaran: ${formatRupiah(totalKeluarFinal)}\n` +
+            `• Masuk Hari Ini: ${formatRupiah(masukFinal)}\n` +
+            `• Total Transaksi Database: ${totalTrxFinal}`;
 
           await sock.sendMessage(targetChat, { text: replyPemasukan });
           return;
@@ -348,9 +440,9 @@ async function startBot() {
             `━━━━━━━━━━━━━━━━━\n` +
             `🍽️ ${single.keterangan}: ${formatRupiah(single.nominal)}\n` +
             `━━━━━━━━━━━━━━━━━\n` +
-            `💵 *Saldo Saat Ini:* ${formatRupiah(stats.saldoTotal)}\n` +
-            `🔴 Keluar Hari Ini: ${formatRupiah(stats.keluarHariIni)}\n` +
-            `🟢 Masuk Hari Ini: ${formatRupiah(stats.masukHariIni)}`;
+            `💵 *Saldo Saat Ini:* ${formatRupiah(saldoFinal)}\n` +
+            `🔴 Keluar Hari Ini: ${formatRupiah(keluarFinal)}\n` +
+            `🟢 Masuk Hari Ini: ${formatRupiah(masukFinal)}`;
 
           await sock.sendMessage(targetChat, { text: replyPengeluaran });
           return;
