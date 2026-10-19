@@ -43,7 +43,6 @@ function getNow() {
 
 const formatRupiah = (num) => `Rp ${Number(num || 0).toLocaleString('id-ID')}`;
 
-// Fungsi pembersih isi folder auth_info (Aman untuk mount path Railway)
 function clearAuthFolder(folderPath = './auth_info') {
   try {
     if (!fs.existsSync(folderPath)) return;
@@ -128,8 +127,8 @@ async function saveToSheet(tipe, nominal, kategori, keterangan) {
 async function calculateRealtimeStats() {
   if (!SHEET_URL) throw new Error("Variabel SHEET_WEBAPP_URL kosong!");
 
-  // Jeda 800ms agar Google Sheets selesai menulis baris transaksi baru
-  await new Promise((resolve) => setTimeout(resolve, 800));
+  // Jeda sinkronisasi agar baris baru terisi di sheet sebelum pembacaan ulang
+  await new Promise((resolve) => setTimeout(resolve, 1000));
 
   try {
     const res = await axios.post(
@@ -162,43 +161,61 @@ async function calculateRealtimeStats() {
 
     if (Array.isArray(rows) && rows.length > 1) {
       const items = rows.slice(1);
-      totalTransaksi = items.length;
 
       const now = new Date();
-      const pad = (n) => String(n).padStart(2, '0');
-      const todayDate = pad(now.getDate());
-      const todayMonth = pad(now.getMonth() + 1);
-      const todayYear = String(now.getFullYear());
-
-      const patternSlash = `${todayDate}/${todayMonth}/${todayYear}`;
-      const patternDash = `${todayYear}-${todayMonth}-${todayDate}`;
+      const currentDay = now.getDate();
+      const currentMonth = now.getMonth();
+      const currentYear = now.getFullYear();
 
       items.forEach((r) => {
-        const rawDate = r[0];
-        const tipe = String(r[2] || '').toLowerCase();
-        const rawNominal = String(r[4] || '0').replace(/[^0-9]/g, '');
-        const nominal = parseInt(rawNominal, 10) || 0;
+        // Cek baris kosong: abaikan jika baris tidak punya data valid
+        const hasContent = r.some((c) => String(c || '').trim() !== '');
+        if (!hasContent) return;
 
-        let isToday = false;
-        if (rawDate) {
-          const strDate = String(rawDate);
-          if (strDate.includes(patternSlash) || strDate.startsWith(patternDash)) {
-            isToday = true;
-          } else {
-            const parsed = new Date(rawDate);
-            if (!isNaN(parsed.getTime())) {
-              isToday =
-                parsed.getDate() === now.getDate() &&
-                parsed.getMonth() === now.getMonth() &&
-                parsed.getFullYear() === now.getFullYear();
-            }
+        const strRow = r.map((c) => String(c || '').trim());
+        const rawDate = r[0];
+
+        // Cari tipe transaksi
+        const tipeStr = strRow.find((v) =>
+          v.toLowerCase().includes('masuk') || v.toLowerCase().includes('keluar')
+        )?.toLowerCase() || '';
+
+        // Cari nominal transaksi
+        let nominal = 0;
+        for (let i = 1; i < r.length; i++) {
+          const cleanNum = String(r[i] || '').replace(/[^0-9]/g, '');
+          const val = parseInt(cleanNum, 10);
+          if (!isNaN(val) && val > 0 && String(r[i]).length < 12) {
+            nominal = val;
+            break;
           }
         }
 
-        if (tipe.includes('masuk')) {
+        // Abaikan baris tanpa nominal valid
+        if (nominal <= 0) return;
+
+        totalTransaksi += 1;
+
+        // Cek apakah transaksi terjadi hari ini
+        let isToday = false;
+        if (rawDate) {
+          const dObj = new Date(rawDate);
+          if (!isNaN(dObj.getTime())) {
+            isToday =
+              dObj.getDate() === currentDay &&
+              dObj.getMonth() === currentMonth &&
+              dObj.getFullYear() === currentYear;
+          } else {
+            const pad = (n) => String(n).padStart(2, '0');
+            const targetSlash = `${pad(currentDay)}/${pad(currentMonth + 1)}/${currentYear}`;
+            isToday = String(rawDate).includes(targetSlash);
+          }
+        }
+
+        if (tipeStr.includes('masuk')) {
           totalMasuk += nominal;
           if (isToday) masukHariIni += nominal;
-        } else if (tipe.includes('keluar')) {
+        } else if (tipeStr.includes('keluar')) {
           totalKeluar += nominal;
           if (isToday) keluarHariIni += nominal;
         }
@@ -236,11 +253,11 @@ function parseTransactionLines(text) {
     const parts = rawContent.split(/\s+/);
 
     const nominal = parseInt(parts[0].replace(/[^0-9]/g, ''), 10);
-    // Bersihkan tanda kurung yang tidak diperlukan di awal/akhir keterangan
     let keterangan = parts.slice(1).join(' ').trim();
-    if (keterangan.startsWith('(') && keterangan.endsWith(')')) {
-      keterangan = keterangan.slice(1, -1).trim();
-    }
+    
+    // Bersihkan tanda kurung berlebih di keterangan
+    keterangan = keterangan.replace(/^\(+\vert{}\)+$/g, '').trim();
+
     if (!keterangan) {
       keterangan = tipe === 'Pemasukan' ? 'Pemasukan Umum' : 'Pengeluaran Umum';
     }
@@ -324,7 +341,7 @@ async function startBot() {
     const isImage = Boolean(msg.message.imageMessage);
 
     try {
-      // 1. Ekstraksi Foto Struk Otomatis
+      // 1. Ekstraksi Foto Struk
       if (isImage) {
         await sock.sendMessage(targetChat, { text: '⏳ Sedang membaca struk belanja Anda...' });
         const buffer = await downloadMediaMessage(msg, 'buffer', {});
@@ -354,20 +371,39 @@ async function startBot() {
       if (lower === 'menu' || lower === 'help' || lower === 'halo') {
         const menuText =
           `🤖 *Panduan Bot Keuangan*\n\n` +
-          `1. *Catat 1 Transaksi:*\n` +
+          `1. *Catat Transaksi:*\n` +
           `   • \`-20000 Makan lalapan\`\n` +
           `   • \`+500000 Gaji sampingan\`\n\n` +
-          `2. *Catat Sekaligus (Baris Baru):*\n` +
+          `2. *Catat Banyak Sekaligus:*\n` +
           `   \`-15000 Kopi\`\n` +
           `   \`-30000 Bensin\`\n\n` +
-          `3. *Foto Struk:*\n` +
-          `   Kirimkan langsung foto struk fisik belanjaan.\n\n` +
-          `4. *Laporan:* Kirim \`laporan hari\`, \`laporan bulan\`, atau \`laporan tahun\``;
+          `3. *Cek Saldo:*\n` +
+          `   Kirim kata \`saldo\`\n\n` +
+          `4. *Foto Struk:*\n` +
+          `   Kirimkan foto fisik struk belanjaan langsung.`;
         await sock.sendMessage(targetChat, { text: menuText });
         return;
       }
 
-      // 3. Parser Multi-baris Transaksi
+      // 3. Perintah Cek Saldo Langsung
+      if (lower === 'saldo' || lower === 'cek saldo' || lower === 'laporan' || lower === 'rekap') {
+        const stats = await calculateRealtimeStats();
+        const replySaldo =
+          `💵 *Ringkasan Saldo Keuangan*\n` +
+          `━━━━━━━━━━━━━━━━━\n` +
+          `💰 *Saldo Saat Ini:* ${formatRupiah(stats.saldoTotal)}\n` +
+          `🟢 Masuk Hari Ini: ${formatRupiah(stats.masukHariIni)}\n` +
+          `🔴 Keluar Hari Ini: ${formatRupiah(stats.keluarHariIni)}\n` +
+          `━━━━━━━━━━━━━━━━━\n` +
+          `📈 Total Pemasukan: ${formatRupiah(stats.totalMasuk)}\n` +
+          `📉 Total Pengeluaran: ${formatRupiah(stats.totalKeluar)}\n` +
+          `📝 Total Riwayat: ${stats.totalTransaksi} transaksi`;
+
+        await sock.sendMessage(targetChat, { text: replySaldo });
+        return;
+      }
+
+      // 4. Parser Multi-baris Transaksi
       const transactions = parseTransactionLines(bodyText);
 
       if (transactions.length > 0) {
@@ -377,7 +413,7 @@ async function startBot() {
 
         const stats = await calculateRealtimeStats();
 
-        // Kasus Banyak Transaksi Sekaligus (Multi-baris)
+        // Multi-baris transaksi
         if (transactions.length > 1) {
           let detailBaris = transactions
             .map((t) => `• ${t.keterangan}: ${formatRupiah(t.nominal)} (${t.tipe})`)
@@ -396,7 +432,7 @@ async function startBot() {
           return;
         }
 
-        // Kasus 1 Transaksi Saja
+        // 1 transaksi pemasukan
         const single = transactions[0];
 
         if (single.tipe === 'Pemasukan') {
@@ -418,6 +454,7 @@ async function startBot() {
           return;
         }
 
+        // 1 transaksi pengeluaran
         if (single.tipe === 'Pengeluaran') {
           const replyPengeluaran =
             `💸 *Pengeluaran Berhasil Dicatat!*\n` +
