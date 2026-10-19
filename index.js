@@ -27,7 +27,7 @@ http.createServer((req, res) => {
   console.log(`[INFO] Server HTTP dummy aktif pada port ${port}`);
 });
 
-// Helper Format Tanggal & Waktu WIB (Asia/Jakarta)
+// Helper Tanggal & Waktu WIB (Asia/Jakarta)
 function getWIBDate() {
   const now = new Date();
   const tanggal = new Intl.DateTimeFormat('id-ID', {
@@ -55,6 +55,7 @@ function clearAuthFolder(folderPath = './auth_info') {
     if (!fs.existsSync(folderPath)) return;
     const files = fs.readdirSync(folderPath);
     for (const file of files) {
+      if (file.includes('finance_state')) continue; // Jangan hapus catatan saldo
       const curPath = path.join(folderPath, file);
       if (fs.lstatSync(curPath).isDirectory()) {
         fs.rmSync(curPath, { recursive: true, force: true });
@@ -63,14 +64,14 @@ function clearAuthFolder(folderPath = './auth_info') {
       }
     }
   } catch (err) {
-    console.error('Gagal membersihkan auth_info:', err.message);
+    console.error('Gagal clear auth_info:', err.message);
   }
 }
 
 // ==========================================
-// 2. ENGINE KALKULASI LOKAL (PERSISTENT STATE)
+// 2. STATE PERSISTENT DALAM VOLUME RAILWAY
 // ==========================================
-const STATE_FILE = './finance_state.json';
+const STATE_FILE = './auth_info/finance_state.json';
 
 function getFinanceState() {
   const { tanggal: today } = getWIBDate();
@@ -87,7 +88,6 @@ function getFinanceState() {
   try {
     if (fs.existsSync(STATE_FILE)) {
       const parsed = JSON.parse(fs.readFileSync(STATE_FILE, 'utf-8'));
-      // Reset akumulasi harian saat berganti hari
       if (parsed.lastDate !== today) {
         parsed.lastDate = today;
         parsed.masukHariIni = 0;
@@ -100,7 +100,11 @@ function getFinanceState() {
     console.error('Gagal membaca state:', err.message);
   }
 
-  fs.writeFileSync(STATE_FILE, JSON.stringify(defaultState, null, 2));
+  try {
+    if (!fs.existsSync('./auth_info')) fs.mkdirSync('./auth_info', { recursive: true });
+    fs.writeFileSync(STATE_FILE, JSON.stringify(defaultState, null, 2));
+  } catch (e) {}
+
   return defaultState;
 }
 
@@ -120,7 +124,11 @@ function recordTransactionState(tipe, nominal) {
     state.keluarHariIni += val;
   }
 
-  fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2));
+  try {
+    fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2));
+  } catch (e) {
+    console.error('Gagal write state:', e.message);
+  }
   return state;
 }
 
@@ -135,7 +143,9 @@ function resetFinanceState() {
     keluarHariIni: 0,
     totalTransaksi: 0
   };
-  fs.writeFileSync(STATE_FILE, JSON.stringify(emptyState, null, 2));
+  try {
+    fs.writeFileSync(STATE_FILE, JSON.stringify(emptyState, null, 2));
+  } catch (e) {}
   return emptyState;
 }
 
@@ -340,7 +350,7 @@ async function startBot() {
       // 3. Reset State Saldo
       if (lower === 'reset saldo' || lower === 'reset data') {
         resetFinanceState();
-        await sock.sendMessage(targetChat, { text: '🔄 Saldo dan riwayat bot berhasil direset ke Rp 0. Anda bisa memulai input saldo awal baru.' });
+        await sock.sendMessage(targetChat, { text: '🔄 Saldo dan riwayat berhasil direset ke Rp 0. Silakan masukkan saldo awal kembali.' });
         return;
       }
 
