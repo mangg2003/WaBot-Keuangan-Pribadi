@@ -17,7 +17,7 @@ const GEMINI_KEY = process.env.GEMINI_API_KEY;
 const SHEET_URL = process.env.SHEET_WEBAPP_URL;
 
 // ==========================================
-// 1. DUMMY HTTP SERVER (Wajib untuk Railway agar tidak SIGTERM)
+// 1. DUMMY HTTP SERVER (Mencegah SIGTERM di Railway)
 // ==========================================
 const port = process.env.PORT || 3000;
 http.createServer((req, res) => {
@@ -25,14 +25,9 @@ http.createServer((req, res) => {
   res.end('Bot Keuangan WhatsApp Aktif 24 Jam');
 }).listen(port, () => {
   console.log(`[INFO] Server HTTP dummy aktif pada port ${port}`);
-  if (!SHEET_URL) {
-    console.error('⚠️ PERINGATAN: Variabel SHEET_WEBAPP_URL masih kosong di Railway Variables!');
-  } else {
-    console.log(`[INFO] Google Sheet WebApp terpasang.`);
-  }
 });
 
-// Helper Format Tanggal & Rupiah
+// Helper Format Waktu & Rupiah
 function getNow() {
   const d = new Date();
   const pad = (n) => String(n).padStart(2, '0');
@@ -94,7 +89,7 @@ async function parseReceipt(buffer) {
 // 3. SIMPAN KE GOOGLE SHEETS
 // ==========================================
 async function saveToSheet(tipe, nominal, kategori, keterangan) {
-  if (!SHEET_URL) throw new Error("Variabel SHEET_WEBAPP_URL kosong! Cek tab Variables di Railway.");
+  if (!SHEET_URL) throw new Error("Variabel SHEET_WEBAPP_URL kosong!");
 
   const { tanggal, waktu } = getNow();
   try {
@@ -127,7 +122,6 @@ async function saveToSheet(tipe, nominal, kategori, keterangan) {
 async function calculateRealtimeStats() {
   if (!SHEET_URL) throw new Error("Variabel SHEET_WEBAPP_URL kosong!");
 
-  // Jeda sinkronisasi agar baris baru terisi di sheet sebelum pembacaan ulang
   await new Promise((resolve) => setTimeout(resolve, 1000));
 
   try {
@@ -142,13 +136,8 @@ async function calculateRealtimeStats() {
 
     let rows = res.data;
     if (typeof rows === 'string') {
-      try {
-        rows = JSON.parse(rows);
-      } catch (e) {
-        console.error("Format data Google Sheets bukan JSON string:", rows);
-      }
+      try { rows = JSON.parse(rows); } catch (e) {}
     }
-
     if (rows && typeof rows === 'object' && rows.data) {
       rows = rows.data;
     }
@@ -159,63 +148,69 @@ async function calculateRealtimeStats() {
     let keluarHariIni = 0;
     let totalTransaksi = 0;
 
-    if (Array.isArray(rows) && rows.length > 1) {
-      const items = rows.slice(1);
-
+    if (Array.isArray(rows) && rows.length > 0) {
       const now = new Date();
-      const currentDay = now.getDate();
-      const currentMonth = now.getMonth();
-      const currentYear = now.getFullYear();
+      const pad = (n) => String(n).padStart(2, '0');
+      const todayDate = pad(now.getDate());
+      const todayMonth = pad(now.getMonth() + 1);
+      const todayYear = String(now.getFullYear());
+      const patternSlash = `${todayDate}/${todayMonth}/${todayYear}`;
 
-      items.forEach((r) => {
-        // Cek baris kosong: abaikan jika baris tidak punya data valid
-        const hasContent = r.some((c) => String(c || '').trim() !== '');
-        if (!hasContent) return;
+      rows.forEach((r) => {
+        if (!r || !Array.isArray(r)) return;
 
-        const strRow = r.map((c) => String(c || '').trim());
-        const rawDate = r[0];
+        // Ambil representasi string tiap kolom
+        const strCols = r.map((c) => String(c || '').trim());
 
-        // Cari tipe transaksi
-        const tipeStr = strRow.find((v) =>
-          v.toLowerCase().includes('masuk') || v.toLowerCase().includes('keluar')
-        )?.toLowerCase() || '';
+        // Abaikan baris header
+        if (strCols.some((col) => col.toLowerCase() === 'tanggal' || col.toLowerCase() === 'nominal')) {
+          return;
+        }
 
-        // Cari nominal transaksi
+        // Tentukan tipe
+        let tipe = '';
+        if (strCols.some((c) => c.toLowerCase().includes('masuk'))) tipe = 'masuk';
+        else if (strCols.some((c) => c.toLowerCase().includes('keluar'))) tipe = 'keluar';
+
+        if (!tipe) return;
+
+        // Ambil nominal angka
         let nominal = 0;
-        for (let i = 1; i < r.length; i++) {
-          const cleanNum = String(r[i] || '').replace(/[^0-9]/g, '');
-          const val = parseInt(cleanNum, 10);
-          if (!isNaN(val) && val > 0 && String(r[i]).length < 12) {
+        for (let i = 0; i < r.length; i++) {
+          const raw = String(r[i] || '').replace(/[^0-9]/g, '');
+          const val = parseInt(raw, 10);
+          if (!isNaN(val) && val > 0 && String(r[i]).length < 12 && !String(r[i]).includes(':') && !String(r[i]).includes('/')) {
             nominal = val;
             break;
           }
         }
 
-        // Abaikan baris tanpa nominal valid
         if (nominal <= 0) return;
 
         totalTransaksi += 1;
 
-        // Cek apakah transaksi terjadi hari ini
+        // Validasi tanggal transaksi
+        const rawDate = r[0];
         let isToday = false;
         if (rawDate) {
-          const dObj = new Date(rawDate);
-          if (!isNaN(dObj.getTime())) {
-            isToday =
-              dObj.getDate() === currentDay &&
-              dObj.getMonth() === currentMonth &&
-              dObj.getFullYear() === currentYear;
+          const strRaw = String(rawDate);
+          if (strRaw.includes(patternSlash) || strRaw.includes(String(now.getDate()))) {
+            isToday = true;
           } else {
-            const pad = (n) => String(n).padStart(2, '0');
-            const targetSlash = `${pad(currentDay)}/${pad(currentMonth + 1)}/${currentYear}`;
-            isToday = String(rawDate).includes(targetSlash);
+            const dObj = new Date(rawDate);
+            if (!isNaN(dObj.getTime())) {
+              isToday =
+                dObj.getDate() === now.getDate() &&
+                dObj.getMonth() === now.getMonth() &&
+                dObj.getFullYear() === now.getFullYear();
+            }
           }
         }
 
-        if (tipeStr.includes('masuk')) {
+        if (tipe === 'masuk') {
           totalMasuk += nominal;
           if (isToday) masukHariIni += nominal;
-        } else if (tipeStr.includes('keluar')) {
+        } else if (tipe === 'keluar') {
           totalKeluar += nominal;
           if (isToday) keluarHariIni += nominal;
         }
@@ -254,8 +249,6 @@ function parseTransactionLines(text) {
 
     const nominal = parseInt(parts[0].replace(/[^0-9]/g, ''), 10);
     let keterangan = parts.slice(1).join(' ').trim();
-    
-    // Bersihkan tanda kurung berlebih di keterangan
     keterangan = keterangan.replace(/^\(+\vert{}\)+$/g, '').trim();
 
     if (!keterangan) {
