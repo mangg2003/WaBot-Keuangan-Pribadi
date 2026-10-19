@@ -27,7 +27,7 @@ http.createServer((req, res) => {
   console.log(`[INFO] Server HTTP dummy aktif pada port ${port}`);
 });
 
-// Helper Format Waktu & Rupiah
+// Helper Format Tanggal & Rupiah
 function getNow() {
   const d = new Date();
   const pad = (n) => String(n).padStart(2, '0');
@@ -50,9 +50,8 @@ function clearAuthFolder(folderPath = './auth_info') {
         fs.unlinkSync(curPath);
       }
     }
-    console.log('Isi folder auth_info berhasil dibersihkan.');
   } catch (err) {
-    console.error('Gagal membersihkan isi folder auth_info:', err.message);
+    console.error('Gagal bersihkan auth_info:', err.message);
   }
 }
 
@@ -122,7 +121,7 @@ async function saveToSheet(tipe, nominal, kategori, keterangan) {
 async function calculateRealtimeStats() {
   if (!SHEET_URL) throw new Error("Variabel SHEET_WEBAPP_URL kosong!");
 
-  await new Promise((resolve) => setTimeout(resolve, 1000));
+  await new Promise((resolve) => setTimeout(resolve, 800));
 
   try {
     const res = await axios.post(
@@ -148,79 +147,51 @@ async function calculateRealtimeStats() {
     let keluarHariIni = 0;
     let totalTransaksi = 0;
 
-    if (Array.isArray(rows) && rows.length > 0) {
+    if (Array.isArray(rows) && rows.length > 1) {
+      const items = rows.slice(1); // Baris 1 adalah header: Tanggal, Waktu, Tipe, Kategori, Nominal, Keterangan
+
       const now = new Date();
       const pad = (n) => String(n).padStart(2, '0');
-      const todayDate = pad(now.getDate());
-      const todayMonth = pad(now.getMonth() + 1);
-      const todayYear = String(now.getFullYear());
-      const patternSlash = `${todayDate}/${todayMonth}/${todayYear}`;
+      const todayDateStr = `${pad(now.getDate())}/${pad(now.getMonth() + 1)}/${now.getFullYear()}`;
 
-      rows.forEach((r) => {
-        if (!r || !Array.isArray(r)) return;
+      items.forEach((r) => {
+        if (!r || r.length === 0) return;
 
-        // Ambil representasi string tiap kolom
-        const strCols = r.map((c) => String(c || '').trim());
-
-        // Abaikan baris header
-        if (strCols.some((col) => col.toLowerCase() === 'tanggal' || col.toLowerCase() === 'nominal')) {
-          return;
-        }
-
-        // Tentukan tipe
-        let tipe = '';
-        if (strCols.some((c) => c.toLowerCase().includes('masuk'))) tipe = 'masuk';
-        else if (strCols.some((c) => c.toLowerCase().includes('keluar'))) tipe = 'keluar';
-
-        if (!tipe) return;
-
-        // Ambil nominal angka
-        let nominal = 0;
-        for (let i = 0; i < r.length; i++) {
-          const raw = String(r[i] || '').replace(/[^0-9]/g, '');
-          const val = parseInt(raw, 10);
-          if (!isNaN(val) && val > 0 && String(r[i]).length < 12 && !String(r[i]).includes(':') && !String(r[i]).includes('/')) {
-            nominal = val;
-            break;
-          }
-        }
+        // Kolom Google Sheet: A=Tanggal, B=Waktu, C=Tipe, D=Kategori, E=Nominal, F=Keterangan
+        const rawDate = String(r[0] || '').trim();
+        const tipe = String(r[2] || '').toLowerCase().trim();
+        const nominal = parseInt(String(r[4] || '0').replace(/[^0-9]/g, ''), 10) || 0;
 
         if (nominal <= 0) return;
 
         totalTransaksi += 1;
 
-        // Validasi tanggal transaksi
-        const rawDate = r[0];
+        // Cek kecocokan tanggal hari ini
         let isToday = false;
-        if (rawDate) {
-          const strRaw = String(rawDate);
-          if (strRaw.includes(patternSlash) || strRaw.includes(String(now.getDate()))) {
-            isToday = true;
-          } else {
-            const dObj = new Date(rawDate);
-            if (!isNaN(dObj.getTime())) {
-              isToday =
-                dObj.getDate() === now.getDate() &&
-                dObj.getMonth() === now.getMonth() &&
-                dObj.getFullYear() === now.getFullYear();
-            }
+        if (rawDate.includes(todayDateStr) || rawDate.startsWith(`${pad(now.getDate())}/`)) {
+          isToday = true;
+        } else {
+          const dObj = new Date(rawDate);
+          if (!isNaN(dObj.getTime())) {
+            isToday =
+              dObj.getDate() === now.getDate() &&
+              dObj.getMonth() === now.getMonth() &&
+              dObj.getFullYear() === now.getFullYear();
           }
         }
 
-        if (tipe === 'masuk') {
+        if (tipe.includes('masuk')) {
           totalMasuk += nominal;
           if (isToday) masukHariIni += nominal;
-        } else if (tipe === 'keluar') {
+        } else if (tipe.includes('keluar')) {
           totalKeluar += nominal;
           if (isToday) keluarHariIni += nominal;
         }
       });
     }
 
-    const saldoTotal = totalMasuk - totalKeluar;
-
     return {
-      saldoTotal,
+      saldoTotal: totalMasuk - totalKeluar,
       totalMasuk,
       totalKeluar,
       masukHariIni,
@@ -306,7 +277,6 @@ async function startBot() {
       console.log(`Koneksi terputus (status: ${statusCode}). Reconnect: ${shouldReconnect}`);
 
       if (isLoggedOut) {
-        console.log('Sesi kedaluwarsa (401/LoggedOut). Membersihkan isi folder auth_info...');
         clearAuthFolder('./auth_info');
         startBot();
       } else if (shouldReconnect) {
@@ -396,7 +366,7 @@ async function startBot() {
         return;
       }
 
-      // 4. Parser Multi-baris Transaksi
+      // 4. Parser Transaksi Manual (+ / -)
       const transactions = parseTransactionLines(bodyText);
 
       if (transactions.length > 0) {
@@ -406,7 +376,7 @@ async function startBot() {
 
         const stats = await calculateRealtimeStats();
 
-        // Multi-baris transaksi
+        // Multi-baris
         if (transactions.length > 1) {
           let detailBaris = transactions
             .map((t) => `• ${t.keterangan}: ${formatRupiah(t.nominal)} (${t.tipe})`)
@@ -425,7 +395,7 @@ async function startBot() {
           return;
         }
 
-        // 1 transaksi pemasukan
+        // Single transaksi
         const single = transactions[0];
 
         if (single.tipe === 'Pemasukan') {
@@ -447,7 +417,6 @@ async function startBot() {
           return;
         }
 
-        // 1 transaksi pengeluaran
         if (single.tipe === 'Pengeluaran') {
           const replyPengeluaran =
             `💸 *Pengeluaran Berhasil Dicatat!*\n` +
