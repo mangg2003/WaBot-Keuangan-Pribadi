@@ -27,12 +27,26 @@ http.createServer((req, res) => {
   console.log(`[INFO] Server HTTP dummy aktif pada port ${port}`);
 });
 
-// Helper Format Tanggal & Rupiah
-function getNow() {
-  const d = new Date();
-  const pad = (n) => String(n).padStart(2, '0');
-  const tanggal = `${pad(d.getDate())}/${pad(d.getMonth() + 1)}/${d.getFullYear()}`;
-  const waktu = `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+// Helper Format Tanggal & Waktu WIB (Asia/Jakarta)
+function getWIBDate() {
+  const now = new Date();
+  // Format Tanggal: DD/MM/YYYY
+  const tanggal = new Intl.DateTimeFormat('id-ID', {
+    timeZone: 'Asia/Jakarta',
+    day: '2-digit',
+    month: '2-digit',
+    year: 'numeric'
+  }).format(now);
+
+  // Format Waktu: HH:mm:ss
+  const waktu = new Intl.DateTimeFormat('id-ID', {
+    timeZone: 'Asia/Jakarta',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false
+  }).format(now).replace(/\./g, ':');
+
   return { tanggal, waktu };
 }
 
@@ -90,7 +104,7 @@ async function parseReceipt(buffer) {
 async function saveToSheet(tipe, nominal, kategori, keterangan) {
   if (!SHEET_URL) throw new Error("Variabel SHEET_WEBAPP_URL kosong!");
 
-  const { tanggal, waktu } = getNow();
+  const { tanggal, waktu } = getWIBDate();
   try {
     const res = await axios.post(
       SHEET_URL.trim(),
@@ -116,7 +130,7 @@ async function saveToSheet(tipe, nominal, kategori, keterangan) {
 }
 
 // ==========================================
-// 4. HITUNG STATISTIK DARI DATABASE
+// 4. HITUNG STATISTIK REAL-TIME & HARI INI
 // ==========================================
 async function calculateRealtimeStats() {
   if (!SHEET_URL) throw new Error("Variabel SHEET_WEBAPP_URL kosong!");
@@ -147,18 +161,13 @@ async function calculateRealtimeStats() {
 
     if (Array.isArray(rows) && rows.length > 1) {
       const items = rows.slice(1);
-
-      const now = new Date();
-      const pad = (n) => String(n).padStart(2, '0');
-      const todayDate = pad(now.getDate());
-      const todayMonth = pad(now.getMonth() + 1);
-      const todayYear = String(now.getFullYear());
-      const patternSlash = `${todayDate}/${todayMonth}/${todayYear}`;
+      const { tanggal: todayWIB } = getWIBDate();
+      const [todayD, todayM, todayY] = todayWIB.split('/').map(Number);
 
       items.forEach((r) => {
         if (!r || r.length === 0) return;
 
-        const rawDate = String(r[0] || '').trim();
+        const rawDate = r[0];
         const tipe = String(r[2] || '').toLowerCase().trim();
         const nominal = parseInt(String(r[4] || '0').replace(/[^0-9]/g, ''), 10) || 0;
 
@@ -166,17 +175,24 @@ async function calculateRealtimeStats() {
 
         totalTransaksi += 1;
 
-        // Cocokkan tanggal
+        // Normalisasi tanggal untuk pencocokan Hari Ini
         let isToday = false;
-        if (rawDate.includes(patternSlash) || rawDate.includes(todayDate)) {
-          isToday = true;
-        } else {
-          const dObj = new Date(rawDate);
-          if (!isNaN(dObj.getTime())) {
-            isToday =
-              dObj.getDate() === now.getDate() &&
-              dObj.getMonth() === now.getMonth() &&
-              dObj.getFullYear() === now.getFullYear();
+        if (rawDate) {
+          const strDate = String(rawDate).trim();
+          if (strDate.includes(todayWIB) || strDate.startsWith(`${String(todayD).padStart(2, '0')}/${String(todayM).padStart(2, '0')}`)) {
+            isToday = true;
+          } else {
+            const dObj = new Date(rawDate);
+            if (!isNaN(dObj.getTime())) {
+              // Format ke tanggal WIB
+              const rowDateWIB = new Intl.DateTimeFormat('id-ID', {
+                timeZone: 'Asia/Jakarta',
+                day: '2-digit',
+                month: '2-digit',
+                year: 'numeric'
+              }).format(dObj);
+              isToday = (rowDateWIB === todayWIB);
+            }
           }
         }
 
@@ -310,12 +326,12 @@ async function startBot() {
         const buffer = await downloadMediaMessage(msg, 'buffer', {});
         const result = await parseReceipt(buffer);
 
-        // Ambil saldo sebelum transaksi disimpan
-        const prevStats = await calculateRealtimeStats();
+        // Ambil kalkulasi sebelum simpan
+        const currentStats = await calculateRealtimeStats();
         await saveToSheet("Pengeluaran", result.nominal, result.kategori, result.keterangan);
 
-        const saldoSekarang = prevStats.saldoTotal - result.nominal;
-        const keluarSekarang = prevStats.keluarHariIni + result.nominal;
+        const saldoFinal = currentStats.saldoTotal - result.nominal;
+        const keluarFinal = currentStats.keluarHariIni + result.nominal;
 
         const reply =
           `🧾 *Struk Berhasil Dicatat!*\n` +
@@ -324,9 +340,9 @@ async function startBot() {
           `📂 Kategori: ${result.kategori}\n` +
           `💸 Pengeluaran: ${formatRupiah(result.nominal)}\n` +
           `━━━━━━━━━━━━━━━━━\n` +
-          `💵 *Saldo Saat Ini:* ${formatRupiah(saldoSekarang)}\n` +
-          `🔴 Keluar Hari Ini: ${formatRupiah(keluarSekarang)}\n` +
-          `🟢 Masuk Hari Ini: ${formatRupiah(prevStats.masukHariIni)}`;
+          `💵 *Saldo Saat Ini:* ${formatRupiah(saldoFinal)}\n` +
+          `🔴 Keluar Hari Ini: ${formatRupiah(keluarFinal)}\n` +
+          `🟢 Masuk Hari Ini: ${formatRupiah(currentStats.masukHariIni)}`;
 
         await sock.sendMessage(targetChat, { text: reply });
         return;
@@ -374,30 +390,30 @@ async function startBot() {
       const transactions = parseTransactionLines(bodyText);
 
       if (transactions.length > 0) {
-        // Ambil kalkulasi saldo dasar terlebih dahulu
-        const baseStats = await calculateRealtimeStats();
+        // Ambil kalkulasi basis dari sheet
+        const currentStats = await calculateRealtimeStats();
 
-        // Simpan semua baris ke Google Sheets
+        // Simpan baris transaksi ke Google Sheets
         for (const t of transactions) {
           await saveToSheet(t.tipe, t.nominal, t.kategori, t.keterangan);
         }
 
-        // Hitung akumulasi instan dari pesan yang baru masuk
-        let addedMasuk = 0;
-        let addedKeluar = 0;
+        // Akumulasikan secara deterministik
+        let deltaMasuk = 0;
+        let deltaKeluar = 0;
         transactions.forEach((t) => {
-          if (t.tipe === 'Pemasukan') addedMasuk += t.nominal;
-          if (t.tipe === 'Pengeluaran') addedKeluar += t.nominal;
+          if (t.tipe === 'Pemasukan') deltaMasuk += t.nominal;
+          if (t.tipe === 'Pengeluaran') deltaKeluar += t.nominal;
         });
 
-        const saldoFinal = baseStats.saldoTotal + addedMasuk - addedKeluar;
-        const masukFinal = baseStats.masukHariIni + addedMasuk;
-        const keluarFinal = baseStats.keluarHariIni + addedKeluar;
-        const totalMasukFinal = baseStats.totalMasuk + addedMasuk;
-        const totalKeluarFinal = baseStats.totalKeluar + addedKeluar;
-        const totalTrxFinal = baseStats.totalTransaksi + transactions.length;
+        const saldoFinal = currentStats.saldoTotal + deltaMasuk - deltaKeluar;
+        const masukFinal = currentStats.masukHariIni + deltaMasuk;
+        const keluarFinal = currentStats.keluarHariIni + deltaKeluar;
+        const totalMasukFinal = currentStats.totalMasuk + deltaMasuk;
+        const totalKeluarFinal = currentStats.totalKeluar + deltaKeluar;
+        const totalTrxFinal = currentStats.totalTransaksi + transactions.length;
 
-        // Format Balasan: Multi Transaksi
+        // Multi-baris
         if (transactions.length > 1) {
           let detailBaris = transactions
             .map((t) => `• ${t.keterangan}: ${formatRupiah(t.nominal)} (${t.tipe})`)
@@ -416,15 +432,16 @@ async function startBot() {
           return;
         }
 
-        // Format Balasan: 1 Transaksi Pemasukan
+        // Single transaksi
         const single = transactions[0];
+
         if (single.tipe === 'Pemasukan') {
           const replyPemasukan =
             `💰 *Pemasukan Berhasil Dicatat!*\n` +
             `━━━━━━━━━━━━━━━━━\n` +
             `💵 *Saldo Total:* ${formatRupiah(saldoFinal)}\n\n` +
             `*Detail:*\n` +
-            `• Saldo Awal: ${formatRupiah(baseStats.saldoTotal)}\n` +
+            `• Saldo Awal: ${formatRupiah(currentStats.saldoTotal)}\n` +
             `• Pemasukan Baru: ${formatRupiah(single.nominal)} (${single.keterangan})\n` +
             `• Total Pemasukan: ${formatRupiah(totalMasukFinal)}\n` +
             `• Total Pengeluaran: ${formatRupiah(totalKeluarFinal)}\n` +
@@ -435,7 +452,6 @@ async function startBot() {
           return;
         }
 
-        // Format Balasan: 1 Transaksi Pengeluaran
         if (single.tipe === 'Pengeluaran') {
           const replyPengeluaran =
             `💸 *Pengeluaran Berhasil Dicatat!*\n` +
