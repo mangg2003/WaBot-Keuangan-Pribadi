@@ -27,7 +27,7 @@ http.createServer((req, res) => {
   console.log(`[INFO] Server HTTP dummy aktif pada port ${port}`);
 });
 
-// Helper Tanggal & Waktu WIB (Asia/Jakarta)
+// Helper Tanggal & Waktu WIB
 function getWIBDate() {
   const now = new Date();
   const tanggal = new Intl.DateTimeFormat('id-ID', {
@@ -99,7 +99,7 @@ async function parseReceipt(buffer) {
 // ==========================================
 // 3. KOMUNIKASI GOOGLE SHEETS
 // ==========================================
-async function postSheet(payload) {
+async function callSheets(payload) {
   if (!SHEET_URL) throw new Error("Variabel SHEET_WEBAPP_URL kosong!");
   const res = await axios.post(SHEET_URL.trim(), payload, {
     maxRedirects: 5,
@@ -113,17 +113,11 @@ async function postSheet(payload) {
 }
 
 // ==========================================
-// 4. HITUNG STATISTIK LANGSUNG
+// 4. HITUNG STATISTIK LANGSUNG DARI SHEET
 // ==========================================
-async function getFinancialStats() {
-  const res = await postSheet({ action: "report" });
-  
-  // Jika Apps Script langsung mengembalikan ringkasan saldo yang valid
-  if (res && typeof res.saldoTotal === 'number' && (res.totalKeluar > 0 || res.totalMasuk > 0)) {
-    return res;
-  }
+async function syncDatabaseStats() {
+  const res = await callSheets({ action: "report" });
 
-  // Fallback: hitung mandiri dari array baris mentah
   let rows = res?.data || res || [];
   if (typeof rows === 'string') {
     try { rows = JSON.parse(rows); } catch (e) {}
@@ -138,26 +132,24 @@ async function getFinancialStats() {
 
   if (Array.isArray(rows) && rows.length > 1) {
     const { tanggal: todayStr } = getWIBDate();
-    const dayTarget = todayStr.split('/')[0];
+    const dayToday = todayStr.split('/')[0];
 
     for (let i = 1; i < rows.length; i++) {
       const r = rows[i];
       if (!Array.isArray(r) || r.length === 0) continue;
 
-      const rawDate = String(r[0] || '').trim();
-      const rawNominal = String(r[4] || '').replace(/[^0-9]/g, '');
-      const nominal = parseInt(rawNominal, 10) || 0;
+      // Ambil angka dari kolom Nominal (indeks 4)
+      const cleanNom = String(r[4] || '').replace(/[^0-9]/g, '');
+      const nominal = parseInt(cleanNom, 10) || 0;
       if (nominal <= 0) continue;
 
       totalTransaksi++;
 
-      // Cari tipe
-      const strRow = r.map((c) => String(c || '').toLowerCase()).join(' ');
-      const isKeluar = strRow.includes('keluar');
-      const isMasuk = strRow.includes('masuk');
+      const tipeStr = String(r[2] || '').toLowerCase().trim();
+      const rawDate = String(r[0] || '').trim();
 
       // Cek apakah tanggal hari ini
-      let isToday = rawDate.includes(todayStr) || rawDate.includes(dayTarget);
+      let isToday = rawDate.includes(todayStr) || (rawDate.includes(dayToday) && rawDate.includes('2026'));
       if (!isToday && rawDate) {
         const d = new Date(rawDate);
         if (!isNaN(d.getTime())) {
@@ -171,10 +163,10 @@ async function getFinancialStats() {
         }
       }
 
-      if (isMasuk) {
+      if (tipeStr.includes('masuk')) {
         totalMasuk += nominal;
         if (isToday) masukHariIni += nominal;
-      } else if (isKeluar) {
+      } else if (tipeStr.includes('keluar')) {
         totalKeluar += nominal;
         if (isToday) keluarHariIni += nominal;
       }
@@ -247,7 +239,7 @@ async function startBot() {
       pairingRequested = true;
       try {
         const code = await sock.requestPairingCode(nomorWA);
-        console.log(`\n👉 KODE PAIRING ANDA: ${code}\n`);
+        console.log(`\n👉 KODE PAIRING: ${code}\n`);
       } catch (err) {
         console.error("Gagal meminta pairing code:", err);
         pairingRequested = false;
@@ -293,10 +285,10 @@ async function startBot() {
         const buffer = await downloadMediaMessage(msg, 'buffer', {});
         const result = await parseReceipt(buffer);
 
-        const current = await getFinancialStats();
+        const current = await syncDatabaseStats();
         const { tanggal, waktu } = getWIBDate();
 
-        await postSheet({
+        await callSheets({
           action: "add",
           tanggal,
           waktu,
@@ -344,7 +336,7 @@ async function startBot() {
 
       // 3. Perintah Cek Saldo
       if (lower === 'saldo' || lower === 'cek saldo' || lower === 'rekap') {
-        const stats = await getFinancialStats();
+        const stats = await syncDatabaseStats();
         const replySaldo =
           `💵 *Ringkasan Saldo Keuangan*\n` +
           `━━━━━━━━━━━━━━━━━\n` +
@@ -360,16 +352,17 @@ async function startBot() {
         return;
       }
 
-      // 4. Parser Transaksi Manual
+      // 4. Parser Transaksi Manual (+ / -)
       const transactions = parseTransactionLines(bodyText);
 
       if (transactions.length > 0) {
-        // Ambil kalkulasi riwayat sebelum baris baru ditulis
-        const current = await getFinancialStats();
+        // Ambil riwayat database yang sudah ada terlebih dahulu
+        const current = await syncDatabaseStats();
         const { tanggal, waktu } = getWIBDate();
 
+        // Tulis baris baru ke Google Sheets
         for (const t of transactions) {
-          await postSheet({
+          await callSheets({
             action: "add",
             tanggal,
             waktu,
@@ -380,7 +373,7 @@ async function startBot() {
           });
         }
 
-        // Akumulasi langsung secara real-time
+        // Kalkulasi mutlak (saldo riwayat + input saat ini)
         let deltaMasuk = 0;
         let deltaKeluar = 0;
         transactions.forEach((t) => {
